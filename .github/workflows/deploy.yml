@@ -1,0 +1,39 @@
+name: Deploy JARVIS
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: jarvis-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.JARVIS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.JARVIS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy JARVIS
+        run: |
+          ssh ${{ secrets.JARVIS_USER }}@${{ secrets.JARVIS_HOST }} '
+            set -e
+
+            cd /opt/jarvis
+
+            git fetch origin main
+            git reset --hard origin/main
+
+            docker compose up -d --build --remove-orphans
+
+            docker compose ps
+
+            docker image prune -f
+          '
