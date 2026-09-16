@@ -1,13 +1,23 @@
-{$JARVIS_DOMAIN} {
+# Example block for the Caddy instance already running on the Hetzner host.
+# Merge this block into the host configuration; do not start a second Caddy.
+jarvis.charlydob.com {
   encode zstd gzip
 
-  @backend path /api/* /ws
-  reverse_proxy @backend backend:8000
-  reverse_proxy web:80
+  # Keep this path outside browser SSO. The gateway authenticates it with the
+  # dedicated JARVIS_CORE_TOKEN sent by the Windows Core over WSS.
+  @jarvis_core path /internal/core/ws
+  handle @jarvis_core {
+    reverse_proxy 127.0.0.1:8088
+  }
+
+  handle {
+    # Insert the host's existing Authelia forward-auth/import directive here.
+    reverse_proxy 127.0.0.1:8088
+  }
 
   header {
     Strict-Transport-Security "max-age=31536000; includeSubDomains"
     X-Content-Type-Options "nosniff"
-    Referrer-Policy "strict-origin-when-cross-origin"
+    Referrer-Policy "same-origin"
   }
 }

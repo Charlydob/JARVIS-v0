@@ -2,38 +2,55 @@ name: Deploy JARVIS
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: jarvis-production
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  deploy:
+  validate:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Configure SSH
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Test and build web
+        working-directory: web
+        run: npm ci && npm test && npm run lint && npm run build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Test gateway
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.JARVIS_SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H "${{ secrets.JARVIS_HOST }}" >> ~/.ssh/known_hosts
+          python -m pip install -r backend/requirements-dev.txt
+          PYTHONPATH=backend pytest backend/tests -q
+      - name: Test Core storage
+        run: PYTHONPATH=core pytest core/tests -q
 
-      - name: Deploy JARVIS
+  deploy:
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Configure pinned SSH identity
+        env:
+          SSH_KEY: ${{ secrets.JARVIS_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.JARVIS_KNOWN_HOSTS }}
         run: |
-          ssh ${{ secrets.JARVIS_USER }}@${{ secrets.JARVIS_HOST }} '
-            set -e
-
-            cd /opt/jarvis
-
-            git fetch origin main
-            git reset --hard origin/main
-
-            docker compose up -d --build --remove-orphans
-
-            docker compose ps
-
-            docker image prune -f
-          '
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+      - name: Deploy only JARVIS services
+        env:
+          JARVIS_HOST: ${{ secrets.JARVIS_HOST }}
+          JARVIS_USER: ${{ secrets.JARVIS_USER }}
+        run: |
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$JARVIS_USER@$JARVIS_HOST" \
+            'cd /opt/jarvis && bash scripts/deploy-server.sh'

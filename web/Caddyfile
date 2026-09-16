@@ -1,9 +1,15 @@
 :80 {
-  @backend path /api/* /ws
-  reverse_proxy @backend backend:8000
+  @gateway path /api/* /ws /internal/core/ws
+  reverse_proxy @gateway gateway:8000
 
   root * /srv
   encode zstd gzip
   try_files {path} /index.html
   file_server
+
+  header {
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "same-origin"
+    Permissions-Policy "camera=(), geolocation=(), microphone=(self)"
+  }
 }

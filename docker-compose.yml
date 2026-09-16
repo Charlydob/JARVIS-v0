@@ -1,4 +1,20 @@
 services:
+  gateway:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      JARVIS_ENVIRONMENT: production
+      JARVIS_CORE_TOKEN: ${JARVIS_CORE_TOKEN:?JARVIS_CORE_TOKEN must be set in .env}
+      JARVIS_CORS_ORIGINS: ${JARVIS_CORS_ORIGINS:-https://jarvis.charlydob.com}
+      JARVIS_CORE_TIMEOUT_SECONDS: ${JARVIS_CORE_TIMEOUT_SECONDS:-180}
+      JARVIS_MAX_AUDIO_BYTES: ${JARVIS_MAX_AUDIO_BYTES:-26214400}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
   web:
     build:
       context: ./web
@@ -7,44 +23,12 @@ services:
         VITE_WS_URL: "/ws"
     restart: unless-stopped
     depends_on:
-      backend:
+      gateway:
         condition: service_healthy
     ports:
       - "127.0.0.1:8088:80"
-
-  backend:
-    build: ./backend
-    restart: unless-stopped
-    environment:
-      JARVIS_ENV: production
-      JARVIS_LLM_PROVIDER: ${JARVIS_LLM_PROVIDER:-mock}
-      JARVIS_OLLAMA_URL: ${JARVIS_OLLAMA_URL:-http://host.docker.internal:11434}
-      JARVIS_OLLAMA_MODEL: ${JARVIS_OLLAMA_MODEL:-llama3.2}
-      JARVIS_CORS_ORIGINS: ${JARVIS_CORS_ORIGINS:-http://localhost:8080}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
-      interval: 10s
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 15s
       timeout: 3s
       retries: 5
-
-  gateway:
-    image: caddy:2.9-alpine
-    restart: unless-stopped
-    profiles: ["production"]
-    environment:
-      JARVIS_DOMAIN: ${JARVIS_DOMAIN:-jarvis.example.com}
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    volumes:
-      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on: [web, backend]
-
-volumes:
-  caddy_data:
-  caddy_config:

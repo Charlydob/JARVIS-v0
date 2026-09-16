@@ -1,136 +1,148 @@
-# JARVIS v0
+# JARVIS v0.2
 
-Interfaz web/PWA y API modular para un asistente personal. Esta primera versión prioriza una presencia visual limpia, responsive y orientada a voz, junto con una base desacoplada para integrar modelos y servicios posteriormente.
+JARVIS es una PWA de voz cuyo cerebro permanece en el PC. Hetzner solo sirve la interfaz y mantiene un relay ligero; no ejecuta Ollama, Whisper ni TTS.
 
-## Funcionalidad
+## Qué funciona
 
-- PWA instalable en escritorio y móvil, con caché del shell de la aplicación.
-- Rostro minimalista de dos ojos con estados `sleeping`, `idle`, `listening`, `thinking`, `speaking` y `error`.
-- Máquina de estados independiente de React y animaciones respetuosas con `prefers-reduced-motion`.
-- Conversación por texto, panel de transcripción/respuesta, configuración y modo display fullscreen.
-- API FastAPI con REST, WebSocket y documentación OpenAPI automática.
-- Contratos reemplazables para LLM, STT, TTS, memoria y herramientas.
-- Adaptador Ollama opcional, configurable y no acoplado al resto de la aplicación.
+- Cara minimalista sobre negro con ojos, pupilas, cejas y boca animadas para `idle`, `listening`, `thinking`, `speaking`, `sleeping`, `muted` y `error`.
+- Clic en la cara para alternar escucha y mute; menú hamburguesa discreto.
+- Escucha continua con captura real del micrófono, detección de actividad de voz y cierre de turno tras 3 segundos de silencio.
+- STT con `faster-whisper`, respuesta con Ollama y TTS ejecutados desde el Core de Windows.
+- Dashboard con historial persistente, entrada manual y feedback correcto/incorrecto. Una valoración incorrecta exige y guarda la respuesta esperada.
+- SQLite en `%USERPROFILE%\.jarvis\memory.db` para historial y feedback.
+- Estado offline real: si el Core no mantiene su conexión, la web muestra a JARVIS dormido y los endpoints conversacionales devuelven `503`.
+- PWA instalable, API REST y WebSocket conservados.
 
-## Estructura
+## Arquitectura segura
 
 ```text
-web/       React + TypeScript + Vite + PWA
-backend/   FastAPI, proveedores y tests
-docs/      documentación técnica
-docker/    proxy Caddy para producción
+Navegador / PWA
+        │ HTTPS + Authelia
+        ▼
+jarvis.charlydob.com (Caddy del host)
+        │ 127.0.0.1:8088
+        ▼
+Web + Gateway (Docker, Hetzner)
+        ▲
+        │ WSS saliente + token interno
+        │
+JARVIS Core (Windows)
+  ├─ Ollama 127.0.0.1:11434
+  ├─ faster-whisper
+  ├─ edge-tts
+  └─ SQLite
 ```
 
-Consulta [la arquitectura detallada](docs/architecture.md) para ver los límites y el flujo entre componentes.
+El PC inicia la conexión. No necesita puertos entrantes, NAT, port-forwarding ni publicar `11434`. El endpoint interno usa un secreto independiente; el tráfico viaja cifrado por Caddy. Consulta [docs/architecture.md](docs/architecture.md) para los límites y el protocolo.
 
-## Desarrollo local
+## Arrancar el Core en Windows
 
-### Requisitos
+Requisitos:
 
-- Node.js 20 o superior
-- Python 3.11 o superior
+- Python 3.11 o 3.12 de 64 bits, disponible como `py -3.11`.
+- Ollama iniciado y el modelo descargado: `ollama pull llama3.1:8b`.
+- Acceso saliente HTTPS a `jarvis.charlydob.com`.
 
-### 1. Configuración
+1. Copia `.env.example` a `.env` en la raíz.
+2. Pon en `JARVIS_CORE_TOKEN` exactamente el mismo secreto aleatorio que existe en `/opt/jarvis/.env`.
+3. Revisa `JARVIS_DATA_DIR` y el modelo de Ollama.
+4. Ejecuta:
+
+```powershell
+cd core
+.\run.ps1
+```
+
+La primera ejecución crea `core\.venv`, instala dependencias y descarga el modelo Whisper configurado. Para iniciarlo al entrar en Windows, abre PowerShell normal (no requiere administrador) y ejecuta una vez:
+
+```powershell
+.\install-autostart.ps1
+```
+
+El Core reconecta automáticamente con espera exponencial si Internet o el servidor no están disponibles. `edge-tts` genera el audio desde el proceso del PC, aunque utiliza el servicio de voz de Microsoft y por tanto requiere Internet; sustituirlo por Piper local es una mejora pendiente si se quiere TTS totalmente offline.
+
+Whisper usa CPU por defecto para funcionar sin instalar librerías CUDA adicionales. Si se instala CUDA/cuBLAS compatible con CTranslate2, se puede cambiar `JARVIS_WHISPER_DEVICE=cuda` y `JARVIS_WHISPER_COMPUTE_TYPE=float16` para aprovechar la GPU.
+
+## Configurar Hetzner
+
+El repositorio debe estar en `/opt/jarvis`, con un `.env` no versionado:
+
+```dotenv
+JARVIS_CORE_TOKEN=<64 caracteres hexadecimales o más>
+JARVIS_CORS_ORIGINS=https://jarvis.charlydob.com
+```
+
+Genera el secreto en el servidor con `openssl rand -hex 32`; copia ese valor al `.env` del PC por un canal seguro. No lo añadas a GitHub ni al código.
+
+Arranque manual:
 
 ```bash
-cp .env.example .env
+cd /opt/jarvis
+docker compose config --quiet
+docker compose up -d --build gateway web
+curl --fail http://127.0.0.1:8088/api/health
 ```
 
-El modo predeterminado usa proveedores mock y no requiere claves ni Ollama.
+El único puerto publicado por Compose es `127.0.0.1:8088`. `8080` queda libre para TechTree. No ejecutes el antiguo perfil Caddy del proyecto: se reutiliza el Caddy del host.
 
-### 2. Backend
+Integra el bloque de ejemplo [docker/Caddyfile](docker/Caddyfile) en la configuración existente del host. Mantén `/internal/core/ws` fuera del forward-auth de navegador, ya que ese endpoint usa el token interno; protege el resto de la aplicación con la directiva de Authelia ya existente. Valida con `caddy validate` antes de recargar Caddy.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r backend/requirements-dev.txt
-cd backend
-uvicorn app.main:app --reload
-```
+## Autodeploy desde GitHub
 
-La API queda en `http://localhost:8000`, su documentación en `/docs` y el health check en `/api/health`.
+Cada push a `main` ejecuta primero tests y build. Solo si pasan, GitHub Actions entra por SSH y ejecuta [scripts/deploy-server.sh](scripts/deploy-server.sh). El script:
 
-### 3. Web
+- comprueba que está exactamente en `/opt/jarvis` y que el remoto es este repositorio;
+- se detiene si hay cambios locales, sin borrarlos;
+- acepta únicamente un avance fast-forward de `main`;
+- reconstruye solo `gateway` y `web`;
+- verifica `http://127.0.0.1:8088/api/health` y muestra logs si falla.
 
-En otra terminal:
+Configura el environment de GitHub `production` y estos secrets:
 
-```bash
-cd web
-npm install
-npm run dev
-```
+| Secret | Contenido |
+|---|---|
+| `JARVIS_HOST` | IP o hostname SSH de Hetzner |
+| `JARVIS_USER` | Usuario de despliegue con acceso limitado a `/opt/jarvis` y Docker |
+| `JARVIS_SSH_KEY` | Clave privada dedicada al despliegue |
+| `JARVIS_KNOWN_HOSTS` | Línea verificada de `known_hosts`; evita confiar a ciegas en `ssh-keyscan` durante cada deploy |
 
-Abre `http://localhost:5173`. Para comprobar la experiencia instalable real, genera el build (`npm run build`) y sírvelo sobre HTTPS o localhost.
+El token PC↔gateway no es un secret de Actions: vive solo en los dos `.env` de ejecución.
 
 ## API
 
-| Método | Ruta | Uso inicial |
+| Método | Ruta | Responsabilidad |
 |---|---|---|
-| `GET` | `/api/health` | Sonda de vida |
-| `GET` | `/api/status` | Versión y proveedores activos |
-| `POST` | `/api/chat` | Conversación de texto |
-| `POST` | `/api/audio` | Carga de audio (STT mock) |
-| `GET` | `/api/memories` | Memorias del proveedor activo |
-| WebSocket | `/ws` | Ping y chat bidireccional |
+| `GET` | `/api/health` | Vida del gateway, aunque el PC esté apagado |
+| `GET` | `/api/status` | Conectividad y proveedores anunciados por el Core |
+| `POST` | `/api/chat` | Relay de conversación hacia Ollama en el PC |
+| `POST` | `/api/audio` | Relay de audio hacia Whisper en el PC |
+| `POST` | `/api/tts` | Audio TTS generado desde el Core |
+| `GET` | `/api/memories` | Contrato de memorias explícitas |
+| `GET` | `/api/history` | Historial persistente para el dashboard |
+| `POST` | `/api/feedback` | Valoración y corrección para entrenamiento futuro |
+| WebSocket | `/ws` | Ping/chat compatible para clientes |
+| WebSocket | `/internal/core/ws` | Canal privado autenticado del Core; no es una API de navegador |
 
-Ejemplo:
-
-```bash
-curl -X POST http://localhost:8000/api/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"Hola, JARVIS"}'
-```
-
-## Variables de entorno
-
-No guardes `.env` ni secretos en Git. El archivo `.env.example` documenta los valores admitidos.
-
-| Variable | Predeterminado | Descripción |
-|---|---|---|
-| `VITE_API_URL` | `http://localhost:8000` | Base HTTP usada por el navegador; vacía detrás de Caddy |
-| `VITE_WS_URL` | `ws://localhost:8000/ws` | URL del WebSocket reservado para streaming |
-| `JARVIS_ENV` | `development` | Entorno de ejecución |
-| `JARVIS_HOST` / `JARVIS_PORT` | `0.0.0.0` / `8000` | Bind del servidor |
-| `JARVIS_CORS_ORIGINS` | `http://localhost:5173,...` | Orígenes permitidos, separados por coma |
-| `JARVIS_LLM_PROVIDER` | `mock` | `mock` u `ollama` |
-| `JARVIS_OLLAMA_URL` | `http://localhost:11434` | URL configurable del servicio Ollama |
-| `JARVIS_OLLAMA_MODEL` | `llama3.2` | Modelo solicitado a Ollama |
-| `JARVIS_DOMAIN` | `jarvis.example.com` | Dominio usado por Caddy en producción |
-
-Para Ollama en el mismo equipo, usa `JARVIS_LLM_PROVIDER=ollama` y la URL local. En Docker Compose se utiliza `host.docker.internal`; para Ollama remoto, sustituye `JARVIS_OLLAMA_URL` por su URL alcanzable desde el contenedor. No expongas Ollama públicamente sin autenticación y controles de red.
-
-## Docker
-
-Levanta web y API para desarrollo o validación local:
+## Desarrollo y pruebas
 
 ```bash
-docker compose up --build web backend
+cd web
+npm ci
+npm test
+npm run lint
+npm run build
+
+python -m pip install -r backend/requirements-dev.txt
+PYTHONPATH=backend pytest backend/tests -q
+PYTHONPATH=core pytest core/tests -q
 ```
 
-La aplicación estará en `http://localhost:8080`. El contenedor web sirve la SPA y el backend permanece en la red interna.
+Para un entorno local completo, usa el mismo token de desarrollo en gateway y Core. Nunca reutilices ese valor en producción.
 
-## Despliegue Linux detrás de Caddy
+## Pendiente o provisional
 
-El perfil `production` incluye una configuración Caddy preparada para TLS automático, proxy WebSocket y enrutamiento de `/api/*`. No instala ni modifica servicios del host.
-
-1. Apunta el DNS del subdominio al servidor.
-2. Copia `.env.example` a `.env`, establece `JARVIS_DOMAIN` y revisa las variables.
-3. Si ya existe un Caddy en el servidor, **no levantes el servicio `gateway`**: incorpora manualmente las reglas de `docker/Caddyfile` en la configuración existente y enruta al puerto local `8080`/backend según tu topología.
-4. En un host sin proxy existente, ejecuta:
-
-```bash
-docker compose --profile production up -d --build
-```
-
-Antes de producción se recomienda añadir persistencia real de memoria, autenticación, límites de petición, observabilidad y una política de copias de seguridad.
-
-## Pruebas
-
-```bash
-cd web && npm test && npm run build
-cd backend && pytest
-```
-
-## Alcance
-
-Esta versión no implementa cámara, domótica, hexápodo, wake word ni visión artificial. Las interfaces de proveedores y herramientas permiten añadir esas capacidades más adelante sin acoplarlas a la UI ni al proveedor de lenguaje.
+- `edge-tts` no es TTS offline; Piper es el reemplazo recomendado si se exige funcionamiento sin Internet.
+- La tabla de memorias explícitas existe, pero todavía no hay extracción automática de hechos ni una política de consolidación.
+- Las correcciones se almacenan y exportan desde SQLite, pero todavía no hay un pipeline de fine-tuning automático.
+- Authelia y el bloque de Caddy del host deben integrarse manualmente porque este repositorio no debe sobrescribir la configuración compartida con otros servicios.
+- El umbral VAD es conservador y puede requerir ajuste según el micrófono y el ruido de la habitación.
