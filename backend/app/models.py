@@ -1,7 +1,6 @@
-from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ChatRequest(BaseModel):
@@ -13,22 +12,29 @@ class ChatResponse(BaseModel):
     message: str
     provider: str
     conversation_id: str
+    message_id: str
 
 
 class AudioResponse(BaseModel):
     transcript: str
     provider: str
-    detail: str
+    detail: str = "complete"
 
 
-class Memory(BaseModel):
-    id: str
-    content: str
-    created_at: datetime
-    metadata: dict[str, Any] = {}
+class FeedbackRequest(BaseModel):
+    message_id: str
+    rating: Literal["good", "bad"]
+    correction: str | None = Field(default=None, max_length=16_000)
+
+    @model_validator(mode="after")
+    def correction_required_for_bad_rating(self) -> "FeedbackRequest":
+        if self.rating == "bad" and not (self.correction or "").strip():
+            raise ValueError("A correction is required when rating a response as bad")
+        return self
 
 
 class StatusResponse(BaseModel):
-    status: str
-    version: str
-    providers: dict[str, str]
+    status: Literal["ready", "offline"]
+    gateway_version: str
+    core_connected: bool
+    core: dict[str, Any] | None = None
