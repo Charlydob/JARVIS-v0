@@ -1,22 +1,32 @@
-export type JarvisState = 'sleeping' | 'idle' | 'listening' | 'thinking' | 'speaking' | 'error'
+export type JarvisState = 'sleeping' | 'idle' | 'listening' | 'thinking' | 'speaking' | 'muted' | 'error'
 
 export type JarvisEvent =
-  | { type: 'WAKE' }
-  | { type: 'SLEEP' }
+  | { type: 'CORE_ONLINE' }
+  | { type: 'CORE_OFFLINE' }
+  | { type: 'MUTE' }
+  | { type: 'UNMUTE' }
   | { type: 'START_LISTENING' }
   | { type: 'SUBMIT' }
   | { type: 'RESPONSE' }
   | { type: 'SPEECH_END' }
+  | { type: 'EMPTY_AUDIO' }
   | { type: 'FAIL' }
   | { type: 'RESET' }
 
+const activeTransitions: Partial<Record<JarvisEvent['type'], JarvisState>> = {
+  CORE_OFFLINE: 'sleeping',
+  MUTE: 'muted',
+  FAIL: 'error'
+}
+
 const transitions: Record<JarvisState, Partial<Record<JarvisEvent['type'], JarvisState>>> = {
-  sleeping: { WAKE: 'idle', START_LISTENING: 'listening', FAIL: 'error' },
-  idle: { SLEEP: 'sleeping', START_LISTENING: 'listening', SUBMIT: 'thinking', FAIL: 'error' },
-  listening: { SLEEP: 'sleeping', SUBMIT: 'thinking', FAIL: 'error' },
-  thinking: { SLEEP: 'sleeping', RESPONSE: 'speaking', FAIL: 'error' },
-  speaking: { SLEEP: 'sleeping', SPEECH_END: 'idle', START_LISTENING: 'listening', FAIL: 'error' },
-  error: { RESET: 'idle', SLEEP: 'sleeping' }
+  sleeping: { CORE_ONLINE: 'idle', MUTE: 'muted' },
+  idle: { ...activeTransitions, START_LISTENING: 'listening', SUBMIT: 'thinking' },
+  listening: { ...activeTransitions, SUBMIT: 'thinking' },
+  thinking: { ...activeTransitions, RESPONSE: 'speaking', EMPTY_AUDIO: 'listening' },
+  speaking: { ...activeTransitions, SPEECH_END: 'listening' },
+  muted: { CORE_OFFLINE: 'sleeping', UNMUTE: 'idle' },
+  error: { CORE_OFFLINE: 'sleeping', MUTE: 'muted', RESET: 'idle', START_LISTENING: 'listening' }
 }
 
 export function transition(state: JarvisState, event: JarvisEvent): JarvisState {
@@ -24,6 +34,11 @@ export function transition(state: JarvisState, event: JarvisEvent): JarvisState 
 }
 
 export const stateLabels: Record<JarvisState, string> = {
-  sleeping: 'En reposo', idle: 'Disponible', listening: 'Escuchando',
-  thinking: 'Pensando', speaking: 'Hablando', error: 'Sin conexión'
+  sleeping: 'Core desconectado',
+  idle: 'Preparado',
+  listening: 'Escuchando',
+  thinking: 'Pensando',
+  speaking: 'Hablando',
+  muted: 'Micrófono silenciado',
+  error: 'Necesito atención'
 }
