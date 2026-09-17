@@ -80,7 +80,14 @@ export function startListeningAnimation(
 
     return () => {}
   }
-
+const listeningMouth = {
+  x: listeningMouth.x,
+  y: listeningMouth.y,
+  width: listeningMouth.width,
+  height: listeningMouth.height,
+  rx: listeningMouth.rx,
+  ry: listeningMouth.ry
+}
   /*
     =============================
     GUARDAR ESTADO ORIGINAL
@@ -178,7 +185,7 @@ export function startListeningAnimation(
       String(
         lerp(
           original.mouth.x,
-          n(refMouth, 'x'),
+          listeningMouth.x,
           t
         )
       )
@@ -189,7 +196,7 @@ export function startListeningAnimation(
       String(
         lerp(
           original.mouth.y,
-          n(refMouth, 'y'),
+          listeningMouth.y,
           t
         )
       )
@@ -200,7 +207,7 @@ export function startListeningAnimation(
       String(
         lerp(
           original.mouth.width,
-          n(refMouth, 'width'),
+          listeningMouth.width,
           t
         )
       )
@@ -211,7 +218,7 @@ export function startListeningAnimation(
       String(
         lerp(
           original.mouth.height,
-          n(refMouth, 'height'),
+          listeningMouth.height,
           t
         )
       )
@@ -222,7 +229,7 @@ export function startListeningAnimation(
       String(
         lerp(
           original.mouth.rx,
-          n(refMouth, 'rx'),
+          listeningMouth.rx,
           t
         )
       )
@@ -233,7 +240,7 @@ export function startListeningAnimation(
       String(
         lerp(
           original.mouth.ry,
-          n(refMouth, 'ry'),
+          listeningMouth.ry,
           t
         )
       )
