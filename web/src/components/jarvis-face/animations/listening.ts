@@ -41,7 +41,6 @@ export function startListeningAnimation(
     mouth
   }: FaceElements
 ): StopAnimation {
-
   /*
     =============================
     LEER REFERENCIAS DEL SVG
@@ -80,14 +79,22 @@ export function startListeningAnimation(
 
     return () => {}
   }
-const listeningMouth = {
-  x: listeningMouth.x,
-  y: listeningMouth.y,
-  width: listeningMouth.width,
-  height: listeningMouth.height,
-  rx: listeningMouth.rx,
-  ry: listeningMouth.ry
-}
+
+  /*
+    Copiamos ahora las medidas.
+    Así TypeScript ya no tiene que
+    volver a trabajar con refMouth | null.
+  */
+
+  const listeningMouth = {
+    x: n(refMouth, 'x'),
+    y: n(refMouth, 'y'),
+    width: n(refMouth, 'width'),
+    height: n(refMouth, 'height'),
+    rx: n(refMouth, 'rx'),
+    ry: n(refMouth, 'ry')
+  }
+
   /*
     =============================
     GUARDAR ESTADO ORIGINAL
@@ -118,9 +125,9 @@ const listeningMouth = {
   }
 
   /*
-    Escala necesaria para transformar
-    los círculos originales en los
-    ojos verticales diseñados.
+    =============================
+    FORMA LISTENING
+    =============================
   */
 
   const leftScaleX =
@@ -148,7 +155,6 @@ const listeningMouth = {
     '#7FDBFF'
 
   let cancelled = false
-
   let entryFrame = 0
 
   let blinkTimer:
@@ -261,7 +267,7 @@ const listeningMouth = {
 
   /*
     =============================
-    FORMA DE LOS OJOS
+    OJOS MÁS ABIERTOS
     =============================
   */
 
@@ -278,7 +284,6 @@ const listeningMouth = {
   */
 
   if (!prefersReducedMotion()) {
-
     const pulseOptions:
       KeyframeAnimationOptions = {
         duration: 1600,
@@ -315,9 +320,22 @@ const listeningMouth = {
 
   /*
     =============================
-    PARPADEOS NATURALES
+    PARPADEO
     =============================
   */
+
+  function scheduleBlink() {
+    if (cancelled) return
+
+    blinkTimer =
+      window.setTimeout(
+        blink,
+        randomBetween(
+          2300,
+          5200
+        )
+      )
+  }
 
   function blink() {
     if (
@@ -349,12 +367,6 @@ const listeningMouth = {
             'cubic-bezier(.4,0,.2,1)'
         }
       )
-
-    /*
-      El segundo ojo cierra
-      unas décimas después.
-      Da menos sensación robótica.
-    */
 
     const rightBlink =
       rightEye.animate(
@@ -388,81 +400,11 @@ const listeningMouth = {
     scheduleBlink()
   }
 
-  function scheduleBlink() {
-    if (cancelled) return
-
-    blinkTimer =
-      window.setTimeout(
-        blink,
-        randomBetween(
-          2300,
-          5200
-        )
-      )
-  }
-
   /*
     =============================
-    ESCUCHA ACTIVA / ASENTIR
+    ASENTIMIENTO
     =============================
   */
-
-  function nod() {
-    if (
-      cancelled ||
-      prefersReducedMotion()
-    ) {
-      return
-    }
-
-    /*
-      Se acerca ligeramente,
-      baja como asintiendo,
-      retrocede un pelín
-      y vuelve a posición.
-    */
-
-    const animation =
-      svg.animate(
-        [
-          {
-            transform:
-              'translateY(3px) scale(1.012)'
-          },
-
-          {
-            transform:
-              'translateY(11px) scale(1.022)',
-            offset: 0.32
-          },
-
-          {
-            transform:
-              'translateY(-1px) scale(.998)',
-            offset: 0.67
-          },
-
-          {
-            transform:
-              'translateY(3px) scale(1.012)'
-          }
-        ],
-        {
-          duration:
-            randomBetween(
-              650,
-              850
-            ),
-
-          easing:
-            'cubic-bezier(.34,1.56,.64,1)'
-        }
-      )
-
-    animations.push(animation)
-
-    scheduleNod()
-  }
 
   function scheduleNod() {
     if (cancelled) return
@@ -477,10 +419,54 @@ const listeningMouth = {
       )
   }
 
+  function nod() {
+    if (
+      cancelled ||
+      prefersReducedMotion()
+    ) {
+      return
+    }
+
+    const animation =
+      svg.animate(
+        [
+          {
+            transform:
+              'translateY(3px) scale(1.012)'
+          },
+          {
+            transform:
+              'translateY(11px) scale(1.022)',
+            offset: 0.32
+          },
+          {
+            transform:
+              'translateY(-1px) scale(.998)',
+            offset: 0.67
+          },
+          {
+            transform:
+              'translateY(3px) scale(1.012)'
+          }
+        ],
+        {
+          duration:
+            randomBetween(
+              650,
+              850
+            ),
+          easing:
+            'cubic-bezier(.34,1.56,.64,1)'
+        }
+      )
+
+    animations.push(animation)
+
+    scheduleNod()
+  }
+
   /*
-    Postura base:
-    un poquito más cerca
-    que Idle.
+    Postura base de escucha.
   */
 
   svg.style.transform =
@@ -522,13 +508,6 @@ const listeningMouth = {
     ) {
       animation.cancel()
     }
-
-    /*
-      Restauramos completamente
-      Idle para que THINKING
-      pueda leer sus coordenadas
-      correctamente.
-    */
 
     leftEye.style.transform = ''
     rightEye.style.transform = ''
