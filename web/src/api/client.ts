@@ -11,6 +11,7 @@ export interface ChatResponse {
   conversation_id: string
   message_id: string
   language?: string
+  turn_id?: string
 }
 
 export interface HistoryItem {
@@ -34,6 +35,7 @@ export interface ConversationStats {
 export interface AudioCaptureMetadata {
   durationMs: number
   speechMs: number
+  maxRms: number
 }
 
 const apiUrl = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
@@ -82,12 +84,13 @@ export async function streamMessage(
   location: UserLocation | undefined,
   language: string | undefined,
   languageConfidence: number | undefined,
+  turnId: string,
   onChunk: (chunk: string) => void
 ): Promise<ChatResponse> {
   const response = await checked(await timedFetch(`${apiUrl}/api/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, conversation_id: conversationId, ...location, language, language_confidence: languageConfidence })
+    body: JSON.stringify({ message, conversation_id: conversationId, turn_id: turnId, ...location, language, language_confidence: languageConfidence })
   }, 180_000))
   if (!response.body) throw new Error('El navegador no admite respuestas en streaming.')
 
@@ -95,11 +98,14 @@ export async function streamMessage(
   const decoder = new TextDecoder()
   let buffer = ''
   let result: ChatResponse | undefined
+  const seenEvents = new Set<string>()
 
   const consume = (block: string) => {
     const data = block.split('\n').find((line) => line.startsWith('data: '))?.slice(6)
     if (!data) return
-    const event = JSON.parse(data) as ({ type: 'chunk'; content: string } | ({ type: 'result' } & ChatResponse) | { type: 'error'; message: string })
+    const event = JSON.parse(data) as ({ type: 'chunk'; content: string; event_id?: string } | ({ type: 'result'; event_id?: string } & ChatResponse) | { type: 'error'; message: string; event_id?: string })
+    if (event.event_id && seenEvents.has(event.event_id)) return
+    if (event.event_id) seenEvents.add(event.event_id)
     if (event.type === 'chunk') onChunk(event.content)
     else if (event.type === 'error') throw new Error(event.message)
     else result = event
@@ -118,26 +124,27 @@ export async function streamMessage(
   return result
 }
 
-export async function transcribeAudio(audio: Blob, metadata?: AudioCaptureMetadata): Promise<{ transcript: string; language?: string; languageConfidence?: number }> {
+export async function transcribeAudio(audio: Blob, metadata: AudioCaptureMetadata, utteranceId: string, conversationId?: string): Promise<{ transcript: string; language?: string; languageConfidence?: number; discardReason?: string; utteranceId?: string }> {
   const form = new FormData()
   const extension = audio.type.includes('mp4') || audio.type.includes('m4a') || audio.type.includes('aac')
     ? 'm4a'
     : audio.type.includes('ogg') ? 'ogg' : 'webm'
   form.append('file', audio, `utterance.${extension}`)
-  if (metadata) {
-    form.append('duration_ms', String(Math.round(metadata.durationMs)))
-    form.append('speech_ms', String(Math.round(metadata.speechMs)))
-  }
+  form.append('duration_ms', String(Math.round(metadata.durationMs)))
+  form.append('speech_ms', String(Math.round(metadata.speechMs)))
+  form.append('max_rms', String(metadata.maxRms))
+  form.append('utterance_id', utteranceId)
+  if (conversationId) form.append('conversation_id', conversationId)
   const response = await checked(await timedFetch(`${apiUrl}/api/audio`, { method: 'POST', body: form }))
-  const body = await response.json() as { transcript: string; language?: string; language_confidence?: number }
-  return { transcript: body.transcript.trim(), language: body.language, languageConfidence: body.language_confidence }
+  const body = await response.json() as { transcript: string; language?: string; language_confidence?: number; discard_reason?: string; utterance_id?: string }
+  return { transcript: body.transcript.trim(), language: body.language, languageConfidence: body.language_confidence, discardReason: body.discard_reason, utteranceId: body.utterance_id }
 }
 
-export async function synthesizeSpeech(text: string, language?: string): Promise<Blob> {
+export async function synthesizeSpeech(text: string, language?: string, turnId?: string): Promise<Blob> {
   const response = await checked(await timedFetch(`${apiUrl}/api/tts`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: text, language })
+    body: JSON.stringify({ message: text, language, turn_id: turnId })
   }, 45_000))
   return response.blob()
 }

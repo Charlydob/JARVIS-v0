@@ -37,6 +37,10 @@ function historyDayLabel(date: Date) {
   return date.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
 }
 
+function cleanAssistantText(value: string) {
+  return value.replace(/^\s*assistant\s*:?\s*/i, '').trim()
+}
+
 const speechAudio = new Audio()
 speechAudio.preload = 'auto'
 let speechUnlocked = false
@@ -118,6 +122,9 @@ export default function App() {
   const noticeRef = useRef<HTMLParagraphElement>(null)
   const onlineRef = useRef(false)
   const statusCheckedRef = useRef(false)
+  const activeTurnRef = useRef<string>()
+  const processingAudioRef = useRef(false)
+  const recentTranscriptRef = useRef<{ text: string; at: number }>()
   const busy = state === 'thinking' || state === 'speaking'
   const historyByDay = useMemo(() => {
     const groups = new Map<string, { label: string; items: HistoryItem[] }>()
@@ -204,9 +211,12 @@ export default function App() {
     if (noticeRef.current) noticeRef.current.scrollTop = noticeRef.current.scrollHeight
   }, [notice])
 
-  const runConversation = useCallback(async (message: string, language?: string, languageConfidence?: number) => {
+  const runConversation = useCallback(async (message: string, language?: string, languageConfidence?: number, requestedTurnId?: string) => {
     const cleanMessage = message.trim()
     if (!cleanMessage || !coreOnline) return
+    if (activeTurnRef.current) return
+    const turnId = requestedTurnId || crypto.randomUUID()
+    activeTurnRef.current = turnId
     dispatch({ type: 'SUBMIT' })
     setNotice(cleanMessage)
     try {
@@ -217,7 +227,7 @@ export default function App() {
       let speechFailed = false
       const speechLanguage = sessionLanguage.current
       const speechQueue = new PrefetchedSpeechQueue<Blob>({
-        synthesize: (text) => synthesizeSpeech(text, speechLanguage),
+        synthesize: (text) => synthesizeSpeech(text, speechLanguage, turnId),
         play: (speech) => playAudio(speech, setAudioPlaying),
         onError: () => { speechFailed = true },
       })
@@ -229,9 +239,9 @@ export default function App() {
         for (const segment of split.segments) speechQueue.enqueue(segment)
       }
 
-      const response = await streamMessage(cleanMessage, conversationId.current, location, language, languageConfidence, (chunk) => {
+      const response = await streamMessage(cleanMessage, conversationId.current, location, language, languageConfidence, turnId, (chunk) => {
         fullText += chunk
-        setNotice(fullText)
+        setNotice(cleanAssistantText(fullText))
         if (!responseStarted) {
           responseStarted = true
           dispatch({ type: 'RESPONSE' })
@@ -244,7 +254,7 @@ export default function App() {
       conversationId.current = response.conversation_id
       sessionLanguage.current = response.language || sessionLanguage.current
       setLatestResponse({ id: response.message_id, rating: null })
-      fullText = response.message || fullText
+      fullText = cleanAssistantText(response.message || fullText)
       setNotice(fullText)
       if (!responseStarted) dispatch({ type: 'RESPONSE' })
       void refreshHistory()
@@ -263,6 +273,8 @@ export default function App() {
       setAudioPlaying(false)
       setNotice(error instanceof Error ? error.message : 'No he podido completar la solicitud')
       dispatch({ type: 'FAIL' })
+    } finally {
+      if (activeTurnRef.current === turnId) activeTurnRef.current = undefined
     }
   }, [coreOnline, location, muted, refreshHistory, soundEnabled, voiceReady])
 
@@ -286,21 +298,34 @@ export default function App() {
     setNotice(next ? 'Voz activada. Estoy escuchando.' : 'Voz silenciada. Seguiré respondiendo por texto.')
   }
 
-  const processAudio = useCallback(async (audio: Blob, metadata: { durationMs: number; speechMs: number }) => {
+  const processAudio = useCallback(async (audio: Blob, metadata: { durationMs: number; speechMs: number; maxRms: number }) => {
+    if (processingAudioRef.current) return
+    processingAudioRef.current = true
+    const utteranceId = crypto.randomUUID()
     dispatch({ type: 'SUBMIT' })
     setNotice('Transcribiendo…')
     try {
-      const transcription = await transcribeAudio(audio, metadata)
+      const transcription = await transcribeAudio(audio, metadata, utteranceId, conversationId.current)
       if (!transcription.transcript) {
         setNotice('Estoy escuchando')
         dispatch({ type: 'EMPTY_AUDIO' })
         return
       }
-      await runConversation(transcription.transcript, transcription.language, transcription.languageConfidence)
+      const normalized = transcription.transcript.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+      const previous = recentTranscriptRef.current
+      if (previous && previous.text === normalized && Date.now() - previous.at < 8_000) {
+        setNotice('Estoy escuchando')
+        dispatch({ type: 'EMPTY_AUDIO' })
+        return
+      }
+      recentTranscriptRef.current = { text: normalized, at: Date.now() }
+      await runConversation(transcription.transcript, transcription.language, transcription.languageConfidence, crypto.randomUUID())
     } catch (error) {
       console.warn('No se pudo transcribir la grabación', error)
       setNotice('No he podido entenderte. Sigo escuchando.')
       dispatch({ type: 'EMPTY_AUDIO' })
+    } finally {
+      processingAudioRef.current = false
     }
   }, [runConversation])
 
@@ -400,7 +425,7 @@ export default function App() {
                 {group.items.map((item) => (
                   <article key={item.id} className={`history-item history-item--${item.role}`}>
                     <small>{item.role === 'user' ? 'Tú' : 'JARVIS'} · {new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small>
-                    <p>{item.content}</p>
+                    <p>{item.role === 'assistant' ? cleanAssistantText(item.content) : item.content}</p>
                     {item.role === 'assistant' && (
                       <div className="feedback">
                         <button className={item.rating === 'good' ? 'selected' : ''} onClick={() => void rate(item.id, 'good')} aria-label="Recompensa positiva, más uno"><Cookie size={15} /></button>

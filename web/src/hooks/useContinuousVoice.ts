@@ -14,6 +14,9 @@ const MAX_IDLE_SEGMENT_MS = 15_000
 const MIN_VOICE_THRESHOLD = 0.012
 const NOISE_MULTIPLIER = 2.8
 const REQUIRED_VOICE_FRAMES = 3
+const MIN_CAPTURE_MS = 650
+const MIN_SPEECH_MS = 350
+const MIN_AUDIO_BYTES = 1200
 
 let sharedMicrophone: MediaStream | undefined
 let pendingMicrophone: Promise<MediaStream> | undefined
@@ -175,6 +178,13 @@ export function useContinuousVoice({ enabled, paused, onListening, onUtterance, 
           const durationMs = Math.max(0, stoppedAt - captureStartedAt)
           const speechMs = heardVoice ? Math.max(0, lastVoiceAt - speechStartedAt) : 0
           const audio = new Blob(chunks, { type: recorder?.mimeType || 'audio/webm' })
+          const discardReason = !submitCurrent ? stopReason
+            : !heardVoice ? 'no_voice'
+              : durationMs < MIN_CAPTURE_MS ? 'audio_too_short'
+                : speechMs < MIN_SPEECH_MS ? 'speech_too_short'
+                  : maxRms < MIN_VOICE_THRESHOLD ? 'energy_too_low'
+                    : audio.size < MIN_AUDIO_BYTES ? 'audio_too_small'
+                      : undefined
           console.info('[JARVIS audio capture]', {
             reason: stopReason,
             durationMs: Math.round(durationMs),
@@ -183,10 +193,11 @@ export function useContinuousVoice({ enabled, paused, onListening, onUtterance, 
             mimeType: audio.type,
             maxRms: Number(maxRms.toFixed(4)),
             threshold: Number(threshold.toFixed(4)),
+            discardReason: discardReason ?? 'none',
           })
-          if (cancelled || !submitCurrent || !heardVoice || !audio.size) return
+          if (cancelled || discardReason) return
           waitingForTurn = true
-          Promise.resolve(callbacks.current.onUtterance(audio, { durationMs, speechMs })).finally(() => {
+          Promise.resolve(callbacks.current.onUtterance(audio, { durationMs, speechMs, maxRms })).finally(() => {
             waitingForTurn = false
           })
         }
