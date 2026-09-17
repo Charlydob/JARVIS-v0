@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -14,17 +15,17 @@ import edge_tts
 import httpx
 from edge_tts import VoicesManager
 from faster_whisper import WhisperModel
-from langdetect import DetectorFactory, LangDetectException, detect
-
 from jarvis_core.config import CoreSettings
 from jarvis_core.feedback import FeedbackLearning
+from jarvis_core.language import SessionLanguagePolicy, response_language
 from jarvis_core.storage import Storage
 from jarvis_core.tools import ToolRegistry
 
 
 SYSTEM_PROMPT = """Eres JARVIS, un asistente personal preciso, discreto y útil.
-Responde en el mismo idioma que use el usuario en su mensaje más reciente, salvo que pida expresamente otro idioma.
+Cumple siempre el requisito OUTPUT LANGUAGE; el idioma de sesión ya ha sido validado conservadoramente.
 Dirígete a él como «señor» (o el equivalente natural en ese idioma) cuando resulte apropiado.
+Responde de forma breve y útil por defecto; amplía solo si la tarea lo necesita o el usuario lo pide.
 No inventes nunca hechos, ubicación, clima, agenda, vivienda, familia, posesiones ni acciones realizadas.
 No menciones mansiones, desayunos ni detalles personales que el usuario no haya proporcionado.
 Un saludo se responde con brevedad, sin añadir noticias, clima ni supuestos.
@@ -38,22 +39,13 @@ PREFERRED_VOICE_LOCALES = {
     "fr": "fr-FR", "it": "it-IT", "ja": "ja-JP", "ko": "ko-KR", "nl": "nl-NL",
     "pl": "pl-PL", "pt": "pt-PT", "ru": "ru-RU", "zh": "zh-CN",
 }
-DetectorFactory.seed = 0
 LOGGER = logging.getLogger("jarvis-core.audio")
+PERFORMANCE_LOGGER = logging.getLogger("jarvis-core.performance")
+TOOL_LOGGER = logging.getLogger("jarvis-core.tools")
 LANGUAGE_NAMES = {
     "de": "German", "en": "English", "es": "Spanish", "fr": "French",
     "it": "Italian", "pt": "Portuguese",
 }
-
-
-def response_language(text: str, fallback: str | None = None) -> str:
-    words = re.findall(r"[^\W\d_]+", text.lower(), flags=re.UNICODE)
-    if fallback and len(words) >= 8 and len(set(words)) / len(words) < 0.25:
-        return fallback
-    try:
-        return detect(text)
-    except LangDetectException:
-        return fallback or "es"
 
 
 class OllamaService:
@@ -233,6 +225,7 @@ class JarvisServices:
         self.tools = ToolRegistry()
         self.tools.load_modules(settings.tool_modules)
         self.feedback = FeedbackLearning(self.storage, self.ollama.select_feedback)
+        self.languages = SessionLanguagePolicy()
         self._location_cache: dict[tuple[float, float], str] = {}
         self._geocode_lock = asyncio.Lock()
         self._last_geocode_at = 0.0
@@ -254,6 +247,7 @@ class JarvisServices:
         if action == "chat":
             return await self._chat(payload)
         if action == "audio":
+            started = time.perf_counter()
             raw = base64.b64decode(str(payload["data"]), validate=True)
             content_type = str(payload.get("content_type", "audio/webm"))
             LOGGER.info(
@@ -271,9 +265,16 @@ class JarvisServices:
             )
             if not transcript:
                 LOGGER.warning("Audio discarded after Whisper: empty transcript")
-            return {"transcript": transcript, "language": language, "provider": "faster-whisper", "detail": "complete"}
+            PERFORMANCE_LOGGER.info("stage=stt duration_ms=%.1f", (time.perf_counter() - started) * 1000)
+            return {
+                "transcript": transcript, "language": language,
+                "language_confidence": metadata["language_probability"],
+                "provider": "faster-whisper", "detail": "complete",
+            }
         if action == "tts":
+            started = time.perf_counter()
             raw = await self.tts.synthesize(str(payload["text"]), payload.get("language"))
+            PERFORMANCE_LOGGER.info("stage=tts_first_audio duration_ms=%.1f", (time.perf_counter() - started) * 1000)
             return {"data": base64.b64encode(raw).decode("ascii"), "content_type": "audio/mpeg"}
         if action == "history":
             return {"items": self.storage.history(int(payload.get("limit", 100)))}
@@ -301,15 +302,35 @@ class JarvisServices:
     ) -> dict[str, Any]:
         message = str(payload["message"]).strip()
         conversation_id = str(payload.get("conversation_id") or uuid4())
-        previous = self.storage.conversation(conversation_id, limit=20)
-        context = await self._tool_context(message, payload.get("latitude"), payload.get("longitude"))
-        feedback_context = await self.feedback.context_for(message)
-        user_language = str(payload.get("language") or response_language(message, "es"))
+        total_started = time.perf_counter()
+        context_started = time.perf_counter()
+        previous = self.storage.conversation(conversation_id, limit=8)
+
+        async def timed_context() -> str | None:
+            started = time.perf_counter()
+            result = await self._tool_context(message, payload.get("latitude"), payload.get("longitude"))
+            PERFORMANCE_LOGGER.info("stage=external_context duration_ms=%.1f", (time.perf_counter() - started) * 1000)
+            return result
+
+        async def timed_feedback() -> str | None:
+            started = time.perf_counter()
+            result = await self.feedback.context_for(message)
+            PERFORMANCE_LOGGER.info("stage=feedback_retrieval duration_ms=%.1f", (time.perf_counter() - started) * 1000)
+            return result
+
+        context, feedback_context = await asyncio.gather(timed_context(), timed_feedback())
+        PERFORMANCE_LOGGER.info("stage=context duration_ms=%.1f history=%d", (time.perf_counter() - context_started) * 1000, len(previous))
+        user_language = self.languages.resolve(
+            conversation_id,
+            message,
+            payload.get("language"),
+            payload.get("language_confidence"),
+        )
         language_name = LANGUAGE_NAMES.get(user_language.split("-", 1)[0].lower(), user_language)
         language_context = (
             f"OUTPUT LANGUAGE REQUIREMENT: {language_name} ({user_language}). "
             f"Answer the user's latest message entirely in {language_name}. "
-            "Do not answer in Spanish unless the required output language is Spanish or the user explicitly asks for Spanish."
+            "Do not switch language because of isolated foreign words or noisy transcription."
         )
         date_context = (
             f"CURRENT LOCAL DATE: {datetime.now().astimezone().date().isoformat()}. "
@@ -323,47 +344,119 @@ class JarvisServices:
             context_parts.append(context)
         context = "\n".join(context_parts)
         conversation: list[dict[str, Any]] = [*previous, {"role": "user", "content": message}]
-        definitions = self.tools.definitions_for(message)
+        routing_started = time.perf_counter()
+        routing_message = message
+        if len(re.findall(r"[^\W\d_]+", message, flags=re.UNICODE)) <= 3 and previous:
+            routing_message = " ".join(str(item.get("content", "")) for item in previous[-2:]) + " " + message
+        definitions = self.tools.definitions_for(routing_message)
+        PERFORMANCE_LOGGER.info("stage=tool_selection duration_ms=%.1f tools=%d", (time.perf_counter() - routing_started) * 1000, len(definitions))
         if definitions:
-            decision = await self.ollama.tool_decision(conversation, context, definitions)
+            direct_query = self.tools.direct_query(routing_message)
+            if direct_query:
+                direct_name, direct_arguments = direct_query
+                decision = {"role": "assistant", "tool_calls": [{"function": {"name": direct_name, "arguments": direct_arguments}}]}
+                PERFORMANCE_LOGGER.info("stage=ollama_tool_decision duration_ms=0.0 mode=deterministic")
+            else:
+                decision_started = time.perf_counter()
+                decision = await self.ollama.tool_decision(conversation, context, definitions)
+                PERFORMANCE_LOGGER.info("stage=ollama_tool_decision duration_ms=%.1f", (time.perf_counter() - decision_started) * 1000)
             tool_calls = list(decision.get("tool_calls") or [])
             if tool_calls:
                 conversation.append(decision)
                 authoritative_results: list[str] = []
+                failure_messages: list[str] = []
                 for call in tool_calls:
                     function = dict(call.get("function") or {})
                     name = str(function.get("name", ""))
                     arguments = function.get("arguments") or {}
                     if not isinstance(arguments, dict):
                         arguments = json.loads(str(arguments))
-                    result = await self.tools.execute(name, arguments)
+                    TOOL_LOGGER.info("event=tool_requested tool=%s arguments=%s", name, json.dumps(arguments, ensure_ascii=False))
+                    tool_started = time.perf_counter()
+                    try:
+                        result = await self.tools.execute(name, arguments)
+                        TOOL_LOGGER.info("event=tool_executed tool=%s duration_ms=%.1f", name, (time.perf_counter() - tool_started) * 1000)
+                        if self._tool_succeeded(result):
+                            TOOL_LOGGER.info("event=tool_success tool=%s", name)
+                        else:
+                            TOOL_LOGGER.warning("event=tool_error tool=%s result=%s", name, result)
+                            failure_messages.append(self._tool_failure_message(result))
+                    except Exception as exc:
+                        TOOL_LOGGER.exception("event=tool_error tool=%s", name)
+                        result = json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
+                        failure_messages.append("No he podido completar esa acción.")
+                    PERFORMANCE_LOGGER.info("stage=tool_execution duration_ms=%.1f tool=%s", (time.perf_counter() - tool_started) * 1000, name)
                     conversation.append({"role": "tool", "tool_name": name, "content": result})
                     authoritative_results.append(f"{name}: {result}")
+                if failure_messages:
+                    answer = " ".join(dict.fromkeys(failure_messages))
+                    await on_chunk(answer)
+                    PERFORMANCE_LOGGER.info("stage=chat_total duration_ms=%.1f path=tool_failure", (time.perf_counter() - total_started) * 1000)
+                    return self._store_chat_result(conversation_id, message, answer, user_language)
                 conversation.append({
                     "role": "system",
                     "content": (
                         "AUTHORITATIVE TOOL RESULTS (the requested actions/queries have already run; "
-                        "answer from these results and never claim the data is unavailable):\n"
+                        "answer only from these results). Never say created, updated, saved, deleted or completed "
+                        "unless the corresponding result explicitly reports success=true or that action=true. "
+                        "If clarificationRequired/confirmationRequired/configurationRequired/error is present, "
+                        "ask or report it briefly and never claim success:\n"
                         + "\n".join(authoritative_results)
                     ),
                 })
             else:
                 answer = str(decision.get("content", "")).strip()
+                if self._claims_success(answer):
+                    answer = "No he ejecutado esa acción. Necesito los datos requeridos para hacerlo."
                 if answer:
                     await on_chunk(answer)
+                PERFORMANCE_LOGGER.info("stage=chat_total duration_ms=%.1f path=tool_no_call", (time.perf_counter() - total_started) * 1000)
                 return self._store_chat_result(conversation_id, message, answer, user_language)
 
         chunks: list[str] = []
+        ollama_started = time.perf_counter()
+        first_token = True
         async for chunk in self.ollama.chat_stream(conversation, context):
+            if first_token:
+                PERFORMANCE_LOGGER.info("stage=ollama_first_token duration_ms=%.1f", (time.perf_counter() - ollama_started) * 1000)
+                first_token = False
             chunks.append(chunk)
             await on_chunk(chunk)
+        PERFORMANCE_LOGGER.info("stage=ollama_total duration_ms=%.1f", (time.perf_counter() - ollama_started) * 1000)
         answer = "".join(chunks).strip()
+        PERFORMANCE_LOGGER.info("stage=chat_total duration_ms=%.1f path=%s", (time.perf_counter() - total_started) * 1000, "tool" if definitions else "fast")
         return self._store_chat_result(conversation_id, message, answer, user_language)
+
+    @staticmethod
+    def _tool_succeeded(result: str) -> bool:
+        try:
+            payload = json.loads(result)
+        except (json.JSONDecodeError, TypeError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        if any(payload.get(key) for key in ("error", "clarificationRequired", "confirmationRequired", "configurationRequired", "ambiguous")):
+            return False
+        action_flags = [key for key in ("created", "updated", "stored", "deleted", "completed") if key in payload]
+        return all(payload[key] is True for key in action_flags) if action_flags else True
+
+    @staticmethod
+    def _tool_failure_message(result: str) -> str:
+        try:
+            payload = json.loads(result)
+        except (json.JSONDecodeError, TypeError):
+            return "No he podido completar esa acción."
+        message = str(payload.get("message") or "").strip() if isinstance(payload, dict) else ""
+        return message or "No he podido completar esa acción."
+
+    @staticmethod
+    def _claims_success(answer: str) -> bool:
+        return bool(re.search(r"\b(cread[oa]|actualizad[oa]|guardad[oa]|eliminad[oa]|completad[oa]|created|updated|saved|deleted)\b", answer.casefold()))
 
     def _store_chat_result(
         self, conversation_id: str, message: str, answer: str, fallback_language: str
     ) -> dict[str, Any]:
-        language = response_language(answer, fallback_language)
+        language = fallback_language
         self.storage.add_message(conversation_id, "user", message)
         message_id = self.storage.add_message(conversation_id, "assistant", answer)
         return {

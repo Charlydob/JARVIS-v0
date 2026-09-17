@@ -4,6 +4,7 @@ import pytest
 
 from jarvis_core.config import CoreSettings
 from jarvis_core.services import JarvisServices, TextToSpeechService, response_language
+from jarvis_core.tools import Tool
 
 
 def test_repetitive_answer_keeps_known_input_language() -> None:
@@ -85,3 +86,33 @@ async def test_tts_uses_generated_text_language_over_input_hint(tmp_path: Path, 
     await service.synthesize("Esta respuesta está claramente escrita en español.", "en")
 
     assert selected_languages == ["en", "es"]
+
+
+@pytest.mark.asyncio
+async def test_failed_tool_is_reported_without_false_success(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+
+    async def failed_reminder(_arguments):
+        raise RuntimeError("BookShell unavailable")
+
+    services.tools.register(Tool(
+        "bookshell_create_reminder", "create", {"type": "object"}, failed_reminder,
+    ))
+
+    async def fake_decision(_messages, _context, _tools):
+        return {"role": "assistant", "tool_calls": [{"function": {
+            "name": "bookshell_create_reminder",
+            "arguments": {"title": "Alemán", "target_date": "2026-09-18", "target_time": "18:00"},
+        }}]}
+
+    services.ollama.tool_decision = fake_decision
+    chunks: list[str] = []
+
+    async def on_chunk(chunk: str) -> None:
+        chunks.append(chunk)
+
+    result = await services.chat_stream({"message": "Recuérdame mañana a las 18:00 que tengo alemán"}, on_chunk)
+
+    assert result["message"] == "No he podido completar esa acción."
+    assert "creado" not in result["message"].casefold()
+    assert chunks == [result["message"]]

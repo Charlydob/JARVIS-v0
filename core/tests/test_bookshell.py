@@ -47,3 +47,18 @@ def test_reminder_uses_canonical_endpoint() -> None:
     assert result["created"] is True
     assert captured["timezone"] == "Europe/Zurich"
     assert captured["alerts"][0]["minutesBefore"] == 60
+
+
+def test_reminder_without_time_asks_and_does_not_write() -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500)
+
+    client = BookShellClient(transport=httpx.MockTransport(handler))
+    result = asyncio.run(client.create_reminder({"title": "Clase de alemán", "target_date": "2026-09-19"}))
+
+    assert result == {"created": False, "clarificationRequired": True, "message": "¿A qué hora, señor?"}
+    assert calls == 0

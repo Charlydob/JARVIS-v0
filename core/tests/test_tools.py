@@ -45,3 +45,20 @@ def test_registry_narrows_bookshell_domains_without_choosing_action() -> None:
 
     assert gym_names == ["bookshell_gym_query", "bookshell_gym_write"]
     assert reminder_names == ["bookshell_reminders_query"]
+
+
+def test_normal_conversation_uses_zero_tools_and_routing_caps_at_three() -> None:
+    async def handler(_arguments):
+        return None
+
+    registry = ToolRegistry()
+    for name in (
+        "bookshell_reminders_query", "bookshell_reminder_update", "bookshell_create_reminder",
+        "bookshell_books_query", "bookshell_update_progress",
+    ):
+        registry.register(Tool(name, name, {"type": "object"}, handler))
+
+    assert registry.definitions_for("¿Cómo estás?") == []
+    assert len(registry.definitions_for("Recuérdame mi libro y la página mañana")) <= 3
+    assert registry.direct_query("¿Qué recordatorios tengo hoy?") == ("bookshell_reminders_query", {"scope": "today"})
+    assert registry.direct_query("¿Por qué página voy en el libro actual?") == ("bookshell_books_query", {"mode": "progress", "limit": 1})

@@ -39,6 +39,17 @@ class FeedbackLearning:
         candidates = self.storage.feedback_examples(50)
         if not candidates:
             return None
+        ranked = sorted(
+            ((_lexical_score(query, str(item["user_message"])), item) for item in candidates),
+            key=lambda pair: pair[0],
+            reverse=True,
+        )
+        if not ranked or ranked[0][0] < 0.18:
+            LOGGER.info(
+                "Feedback retrieval: mode=fast-skip candidates=%d selected=0 query=%r",
+                len(candidates), query,
+            )
+            return None
         selected_ids: list[str] = []
         mode = "lexical-fallback"
         if self.selector:
@@ -49,11 +60,6 @@ class FeedbackLearning:
             except Exception:
                 LOGGER.exception("Semantic feedback selection failed; using lexical fallback")
         if not selected_ids:
-            ranked = sorted(
-                ((_lexical_score(query, str(item["user_message"])), item) for item in candidates),
-                key=lambda pair: pair[0],
-                reverse=True,
-            )
             selected_ids = [
                 str(item["feedback_id"]) for score, item in ranked[: self.max_examples] if score >= 0.34
             ]

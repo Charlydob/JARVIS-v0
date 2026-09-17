@@ -169,13 +169,16 @@ class BookShellClient:
             target_date = (datetime.now(ZoneInfo(self.timezone)).date() + offset).isoformat()
         if not target_date:
             return {"created": False, "clarificationRequired": True, "message": "¿Para qué fecha creo el recordatorio?"}
+        target_time = str(arguments.get("target_time") or "").strip()
+        if not target_time:
+            return {"created": False, "clarificationRequired": True, "message": "¿A qué hora, señor?"}
         body = {
             "title": str(arguments["title"]).strip(),
             "description": str(arguments.get("description") or "").strip(),
             "emoji": "⏰",
             "type": "normal",
             "targetDate": target_date,
-            "targetTime": str(arguments.get("target_time") or "") or None,
+            "targetTime": target_time,
             "timezone": self.timezone,
             "source": {"type": "manual", "metadata": {"createdBy": "jarvis"}},
             "alerts": [{"mode": "relative", "minutesBefore": minutes, "channel": "telegram"}],
