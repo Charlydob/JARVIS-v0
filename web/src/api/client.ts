@@ -20,6 +20,8 @@ export interface HistoryItem {
   content: string
   created_at: string
   rating: 'good' | 'bad' | null
+  reward: 1 | -1 | null
+  reason: string | null
   correction: string | null
 }
 
@@ -63,6 +65,47 @@ export async function sendMessage(message: string, conversationId?: string, loca
   }))).json() as Promise<ChatResponse>
 }
 
+export async function streamMessage(
+  message: string,
+  conversationId: string | undefined,
+  location: UserLocation | undefined,
+  language: string | undefined,
+  onChunk: (chunk: string) => void
+): Promise<ChatResponse> {
+  const response = await checked(await timedFetch(`${apiUrl}/api/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, conversation_id: conversationId, ...location, language })
+  }, 180_000))
+  if (!response.body) throw new Error('El navegador no admite respuestas en streaming.')
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result: ChatResponse | undefined
+
+  const consume = (block: string) => {
+    const data = block.split('\n').find((line) => line.startsWith('data: '))?.slice(6)
+    if (!data) return
+    const event = JSON.parse(data) as ({ type: 'chunk'; content: string } | ({ type: 'result' } & ChatResponse) | { type: 'error'; message: string })
+    if (event.type === 'chunk') onChunk(event.content)
+    else if (event.type === 'error') throw new Error(event.message)
+    else result = event
+  }
+
+  while (true) {
+    const { value, done } = await reader.read()
+    buffer += decoder.decode(value, { stream: !done })
+    const blocks = buffer.split('\n\n')
+    buffer = blocks.pop() ?? ''
+    for (const block of blocks) consume(block)
+    if (done) break
+  }
+  if (buffer.trim()) consume(buffer)
+  if (!result) throw new Error('La respuesta en streaming terminó antes de completarse.')
+  return result
+}
+
 export async function transcribeAudio(audio: Blob): Promise<{ transcript: string; language?: string }> {
   const form = new FormData()
   const extension = audio.type.includes('mp4') || audio.type.includes('m4a') || audio.type.includes('aac')
@@ -87,10 +130,10 @@ export async function getHistory(): Promise<HistoryItem[]> {
   return (await checked(await fetch(`${apiUrl}/api/history?limit=200`, { cache: 'no-store' }))).json() as Promise<HistoryItem[]>
 }
 
-export async function sendFeedback(messageId: string, rating: 'good' | 'bad', correction?: string): Promise<void> {
+export async function sendFeedback(messageId: string, rating: 'good' | 'bad', correction?: string, reason?: string): Promise<void> {
   await checked(await fetch(`${apiUrl}/api/feedback`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message_id: messageId, rating, correction })
+    body: JSON.stringify({ message_id: messageId, rating, correction, reason })
   }))
 }

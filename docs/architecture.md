@@ -23,7 +23,7 @@ core    → {type: result, id, ok, result|error}
 
 Solo se admite un Core activo; una conexión nueva reemplaza a la anterior. Si se corta, las solicitudes pendientes fallan, `/api/status` pasa a `offline` y la UI entra en `sleeping`.
 
-Acciones actuales: `chat`, `audio`, `tts`, `history`, `memories` y `feedback`. El audio viaja en base64 y tiene un límite configurable de 25 MiB. Las respuestas del Core se correlacionan sin exponer el token al navegador.
+Acciones actuales: `chat`, `chat_stream`, `audio`, `tts`, `history`, `memories` y `feedback`. El audio viaja en base64 y tiene un límite configurable de 25 MiB. Las respuestas del Core se correlacionan sin exponer el token al navegador. `chat_stream` retransmite fragmentos Ollama por SSE y termina con el resultado persistido.
 
 ## Flujo de voz
 
@@ -34,7 +34,7 @@ permiso de micrófono
   → 3 s de silencio
   → POST /api/audio
   → Whisper en Windows
-  → POST /api/chat
+  → POST /api/chat/stream
   → Ollama en Windows
   → POST /api/tts
   → TTS en Windows

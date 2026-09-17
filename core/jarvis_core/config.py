@@ -12,6 +12,7 @@ class CoreSettings(BaseSettings):
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
     tts_voice: str = "es-ES-AlvaroNeural"
+    tool_modules: str = ""
     data_dir: Path = Path.home() / ".jarvis"
     reconnect_max_seconds: int = 30
     log_level: str = "INFO"

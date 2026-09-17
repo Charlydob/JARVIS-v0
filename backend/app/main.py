@@ -1,10 +1,12 @@
 import base64
+import json
 import secrets
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from app.config import get_settings
 from app.models import AudioResponse, ChatRequest, ChatResponse, FeedbackRequest, StatusResponse
@@ -63,6 +65,23 @@ async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         return ChatResponse.model_validate(result)
     except (CoreOfflineError, CoreRequestError) as exc:
         raise unavailable(exc) from exc
+
+
+@app.post("/api/chat/stream", tags=["conversation"])
+async def chat_stream(payload: ChatRequest, request: Request) -> StreamingResponse:
+    async def events():
+        try:
+            async for event in relay(request).stream_request("chat_stream", payload.model_dump()):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except (CoreOfflineError, CoreRequestError) as exc:
+            error = {"type": "error", "message": str(unavailable(exc).detail)}
+            yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/audio", response_model=AudioResponse, tags=["conversation"])

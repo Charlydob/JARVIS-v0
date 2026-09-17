@@ -1,11 +1,11 @@
 import { FormEvent, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import { ArrowLeft, Check, History, Menu, Send, ThumbsDown, ThumbsUp, Volume2, VolumeX, X } from 'lucide-react'
+import { ArrowLeft, Check, Cookie, History, Menu, Send, Volume2, VolumeX, X } from 'lucide-react'
 import {
   getHistory,
   getStatus,
   HistoryItem,
   sendFeedback,
-  sendMessage,
+  streamMessage,
   synthesizeSpeech,
   transcribeAudio
 } from './api/client'
@@ -13,8 +13,13 @@ import type { UserLocation } from './api/client'
 import { JarvisFace } from './components/JarvisFace'
 import { useContinuousVoice } from './hooks/useContinuousVoice'
 import { JarvisState, stateLabels, transition } from './state/machine'
+import { takeSpeechSegments } from './speech'
 
 type View = 'face' | 'dashboard'
+
+function WhipIcon({ size = 15 }: { size?: number }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M4 20l4-4" /><path d="M7 17c6 2 13-2 12-8-.5-3-4-5-7-3-2 1-2 4 0 5 2 1 5 0 7-2" /><path d="M3 19l2 2" /></svg>
+}
 
 function sameLocalDay(left: Date, right: Date) {
   return left.getFullYear() === right.getFullYear() && left.getMonth() === right.getMonth() && left.getDate() === right.getDate()
@@ -101,7 +106,9 @@ export default function App() {
   const [historyLoading, setHistoryLoading] = useState(false)
   const [badMessage, setBadMessage] = useState<string | null>(null)
   const [correction, setCorrection] = useState('')
+  const [feedbackReason, setFeedbackReason] = useState('incorrect')
   const conversationId = useRef<string>()
+  const noticeRef = useRef<HTMLParagraphElement>(null)
   const onlineRef = useRef(false)
   const statusCheckedRef = useRef(false)
   const busy = state === 'thinking' || state === 'speaking'
@@ -176,27 +183,61 @@ export default function App() {
     if (view === 'dashboard') void refreshHistory()
   }, [view, refreshHistory])
 
+  useEffect(() => {
+    if (noticeRef.current) noticeRef.current.scrollTop = noticeRef.current.scrollHeight
+  }, [notice])
+
   const runConversation = useCallback(async (message: string, language?: string) => {
     const cleanMessage = message.trim()
     if (!cleanMessage || !coreOnline) return
     dispatch({ type: 'SUBMIT' })
     setNotice(cleanMessage)
     try {
-      const response = await sendMessage(cleanMessage, conversationId.current, location, language)
+      const shouldSpeak = soundEnabled && voiceReady && !muted
+      let fullText = ''
+      let speechBuffer = ''
+      let responseStarted = false
+      let speechFailed = false
+      let speechQueue = Promise.resolve()
+
+      const queueSpeech = (flush = false) => {
+        if (!shouldSpeak) return
+        const split = takeSpeechSegments(speechBuffer, flush)
+        speechBuffer = split.remainder
+        for (const segment of split.segments) {
+          speechQueue = speechQueue.then(async () => {
+            const speech = await synthesizeSpeech(segment)
+            await playAudio(speech)
+          }).catch(() => { speechFailed = true })
+        }
+      }
+
+      const response = await streamMessage(cleanMessage, conversationId.current, location, language, (chunk) => {
+        fullText += chunk
+        setNotice(fullText)
+        if (!responseStarted) {
+          responseStarted = true
+          dispatch({ type: 'RESPONSE' })
+        }
+        if (shouldSpeak) {
+          speechBuffer += chunk
+          queueSpeech()
+        }
+      })
       conversationId.current = response.conversation_id
-      setNotice(response.message)
-      dispatch({ type: 'RESPONSE' })
+      fullText = response.message || fullText
+      setNotice(fullText)
+      if (!responseStarted) dispatch({ type: 'RESPONSE' })
       void refreshHistory()
-      if (soundEnabled && voiceReady && !muted) {
-        try {
-          const speech = await synthesizeSpeech(response.message, response.language || language)
-          await playAudio(speech)
-        } catch {
+      if (shouldSpeak) {
+        queueSpeech(true)
+        await speechQueue
+        if (speechFailed) {
           setVoiceReady(false)
-          setNotice(`${response.message}\nToca la boca para volver a activar la voz.`)
+          setNotice(`${fullText}\nToca la boca para volver a activar la voz.`)
         }
       } else if (soundEnabled && !voiceReady) {
-        setNotice(`${response.message}\nToca la boca para activar la voz.`)
+        setNotice(`${fullText}\nToca la boca para activar la voz.`)
       }
       dispatch({ type: 'SPEECH_END' })
     } catch (error) {
@@ -277,16 +318,17 @@ export default function App() {
     if (rating === 'bad') {
       setBadMessage(messageId)
       setCorrection('')
+      setFeedbackReason('incorrect')
       return
     }
-    await sendFeedback(messageId, rating)
+    await sendFeedback(messageId, rating, undefined, 'perfect')
     await refreshHistory()
   }
 
   const submitCorrection = async (event: FormEvent) => {
     event.preventDefault()
     if (!badMessage || !correction.trim()) return
-    await sendFeedback(badMessage, 'bad', correction.trim())
+    await sendFeedback(badMessage, 'bad', correction.trim(), feedbackReason)
     setBadMessage(null)
     setCorrection('')
     await refreshHistory()
@@ -313,8 +355,8 @@ export default function App() {
                     <p>{item.content}</p>
                     {item.role === 'assistant' && (
                       <div className="feedback">
-                        <button className={item.rating === 'good' ? 'selected' : ''} onClick={() => void rate(item.id, 'good')} aria-label="Respuesta correcta"><ThumbsUp size={15} /></button>
-                        <button className={item.rating === 'bad' ? 'selected' : ''} onClick={() => void rate(item.id, 'bad')} aria-label="Respuesta incorrecta"><ThumbsDown size={15} /></button>
+                        <button className={item.rating === 'good' ? 'selected' : ''} onClick={() => void rate(item.id, 'good')} aria-label="Recompensa positiva, más uno"><Cookie size={15} /></button>
+                        <button className={item.rating === 'bad' ? 'selected' : ''} onClick={() => void rate(item.id, 'bad')} aria-label="Recompensa negativa, menos uno"><WhipIcon /></button>
                         {item.correction && <span><Check size={13} /> Corrección guardada</span>}
                       </div>
                     )}
@@ -336,6 +378,13 @@ export default function App() {
               <button type="button" className="dialog-close" onClick={() => setBadMessage(null)}><X size={18} /></button>
               <h2>¿Qué debería haber respondido?</h2>
               <p>La corrección se guardará en el PC para futuros datos de entrenamiento.</p>
+              <select value={feedbackReason} onChange={(event) => setFeedbackReason(event.target.value)} aria-label="Motivo del feedback">
+                <option value="incorrect">Incorrecta</option>
+                <option value="too_long">Demasiado larga</option>
+                <option value="not_useful">Poco útil</option>
+                <option value="tone">Tono inadecuado</option>
+                <option value="other">Otro motivo</option>
+              </select>
               <textarea autoFocus value={correction} onChange={(event) => setCorrection(event.target.value)} rows={5} />
               <button className="save-button" disabled={!correction.trim()}>Guardar corrección</button>
             </form>
@@ -361,7 +410,7 @@ export default function App() {
       <section className="presence">
         <JarvisFace state={state} voiceEnabled={soundEnabled && voiceReady} onClick={toggleMute} onToggleVoice={toggleSound} />
         <p className="state-label">{stateLabels[state]}</p>
-        <p className="notice">{notice}</p>
+        <p className="notice" ref={noticeRef}>{notice}</p>
       </section>
     </main>
   )

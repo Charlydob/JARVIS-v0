@@ -30,6 +30,7 @@ class FeedbackRequest(BaseModel):
     message_id: str
     rating: Literal["good", "bad"]
     correction: str | None = Field(default=None, max_length=16_000)
+    reason: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def correction_required_for_bad_rating(self) -> "FeedbackRequest":

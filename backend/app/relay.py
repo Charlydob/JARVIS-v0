@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import suppress
 from datetime import UTC, datetime
+from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
 
@@ -24,6 +25,7 @@ class CoreRelay:
         self._send_lock = asyncio.Lock()
         self._connection_lock = asyncio.Lock()
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._streams: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
         self._metadata: dict[str, Any] | None = None
         self._last_seen: datetime | None = None
 
@@ -61,11 +63,20 @@ class CoreRelay:
                     if isinstance(metadata, dict):
                         self._metadata = metadata
                     continue
+                if message_type == "chunk":
+                    request_id = str(message.get("id", ""))
+                    queue = self._streams.get(request_id)
+                    if queue is not None:
+                        queue.put_nowait(message)
+                    continue
                 if message_type == "result":
                     request_id = str(message.get("id", ""))
                     future = self._pending.pop(request_id, None)
                     if future is not None and not future.done():
                         future.set_result(message)
+                    queue = self._streams.get(request_id)
+                    if queue is not None:
+                        queue.put_nowait(None)
         except WebSocketDisconnect:
             pass
         finally:
@@ -78,6 +89,9 @@ class CoreRelay:
                         if not future.done():
                             future.set_exception(error)
                     self._pending.clear()
+                    for queue in self._streams.values():
+                        queue.put_nowait(None)
+                    self._streams.clear()
 
     async def request(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         socket = self._socket
@@ -104,3 +118,41 @@ class CoreRelay:
         if not isinstance(result, dict):
             raise CoreRequestError("Core returned an invalid response")
         return result
+
+    async def stream_request(
+        self, action: str, payload: dict[str, Any] | None = None
+    ) -> AsyncIterator[dict[str, Any]]:
+        socket = self._socket
+        if socket is None:
+            raise CoreOfflineError("JARVIS Core is offline")
+
+        request_id = str(uuid4())
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        self._pending[request_id] = future
+        self._streams[request_id] = queue
+        try:
+            async with self._send_lock:
+                if socket is not self._socket:
+                    raise CoreOfflineError("JARVIS Core reconnected while sending")
+                await socket.send_json({"type": "request", "id": request_id, "action": action, "payload": payload or {}})
+
+            async with asyncio.timeout(self.timeout):
+                while True:
+                    item = await queue.get()
+                    if item is None:
+                        break
+                    yield {"type": "chunk", "content": str(item.get("content", ""))}
+                message = await future
+        except TimeoutError as exc:
+            raise CoreRequestError(f"Core timed out while handling {action}") from exc
+        finally:
+            self._pending.pop(request_id, None)
+            self._streams.pop(request_id, None)
+
+        if not message.get("ok"):
+            raise CoreRequestError(str(message.get("error", "Core request failed")))
+        result = message.get("result")
+        if not isinstance(result, dict):
+            raise CoreRequestError("Core returned an invalid response")
+        yield {"type": "result", **result}

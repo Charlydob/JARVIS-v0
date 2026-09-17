@@ -30,6 +30,8 @@ class Storage:
                 id TEXT PRIMARY KEY,
                 message_id TEXT NOT NULL REFERENCES messages(id),
                 rating TEXT NOT NULL CHECK(rating IN ('good', 'bad')),
+                reward INTEGER CHECK(reward IN (-1, 1)),
+                reason TEXT,
                 correction TEXT,
                 created_at TEXT NOT NULL
             );
@@ -41,6 +43,17 @@ class Storage:
             );
             """
         )
+        feedback_columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(feedback)").fetchall()
+        }
+        with self.connection:
+            if "reward" not in feedback_columns:
+                self.connection.execute("ALTER TABLE feedback ADD COLUMN reward INTEGER")
+            if "reason" not in feedback_columns:
+                self.connection.execute("ALTER TABLE feedback ADD COLUMN reason TEXT")
+            self.connection.execute(
+                "UPDATE feedback SET reward = CASE rating WHEN 'good' THEN 1 ELSE -1 END WHERE reward IS NULL"
+            )
 
     def add_message(self, conversation_id: str, role: str, content: str) -> str:
         message_id = str(uuid4())
@@ -62,7 +75,7 @@ class Storage:
         rows = self.connection.execute(
             """
             SELECT m.id, m.conversation_id, m.role, m.content, m.created_at,
-                   f.rating, f.correction
+                   f.rating, f.reward, f.reason, f.correction
             FROM messages m
             LEFT JOIN feedback f ON f.message_id = m.id
             ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?
@@ -77,7 +90,9 @@ class Storage:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def add_feedback(self, message_id: str, rating: str, correction: str | None) -> str:
+    def add_feedback(
+        self, message_id: str, rating: str, correction: str | None, reason: str | None = None
+    ) -> str:
         message = self.connection.execute(
             "SELECT id FROM messages WHERE id = ? AND role = 'assistant'", (message_id,)
         ).fetchone()
@@ -87,8 +102,8 @@ class Storage:
         with self.connection:
             self.connection.execute("DELETE FROM feedback WHERE message_id = ?", (message_id,))
             self.connection.execute(
-                "INSERT INTO feedback(id, message_id, rating, correction, created_at) VALUES (?, ?, ?, ?, ?)",
-                (feedback_id, message_id, rating, correction, utc_now()),
+                "INSERT INTO feedback(id, message_id, rating, reward, reason, correction, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (feedback_id, message_id, rating, 1 if rating == "good" else -1, reason, correction, utc_now()),
             )
         return feedback_id
 

@@ -49,7 +49,15 @@ async def handle_request(
 ) -> None:
     request_id = str(message.get("id", ""))
     try:
-        result = await services.dispatch(str(message.get("action", "")), dict(message.get("payload") or {}))
+        action = str(message.get("action", ""))
+        payload = dict(message.get("payload") or {})
+        if action == "chat_stream":
+            async def emit_chunk(chunk: str) -> None:
+                await send_json(socket, lock, {"type": "chunk", "id": request_id, "content": chunk})
+
+            result = await services.chat_stream(payload, emit_chunk)
+        else:
+            result = await services.dispatch(action, payload)
         response = {"type": "result", "id": request_id, "ok": True, "result": result}
     except Exception as exc:
         LOGGER.exception("Core request failed: %s", message.get("action"))

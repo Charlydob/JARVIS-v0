@@ -70,6 +70,38 @@ def test_chat_round_trip_through_connected_core() -> None:
         assert response.json()["message"] == "Hola desde el PC"
 
 
+def test_chat_stream_relays_chunks_and_final_result() -> None:
+    headers = {"Authorization": f"Bearer {settings.core_token}"}
+    with TestClient(app) as client, client.websocket_connect("/internal/core/ws", headers=headers) as core:
+        assert core.receive_json() == {"type": "hello_ack"}
+        core.send_json({"type": "hello", "metadata": {}})
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            response_future = executor.submit(client.post, "/api/chat/stream", json={"message": "Tell me more"})
+            request = core.receive_json()
+            assert request["action"] == "chat_stream"
+            core.send_json({"type": "chunk", "id": request["id"], "content": "First sentence. "})
+            core.send_json({"type": "chunk", "id": request["id"], "content": "Second sentence."})
+            core.send_json({
+                "type": "result",
+                "id": request["id"],
+                "ok": True,
+                "result": {
+                    "message": "First sentence. Second sentence.",
+                    "provider": "ollama",
+                    "conversation_id": "conversation",
+                    "message_id": "message",
+                    "language": "en",
+                },
+            })
+            response = response_future.result(timeout=2)
+
+        assert response.status_code == 200
+        assert '"type": "chunk"' in response.text
+        assert '"type": "result"' in response.text
+        assert "Second sentence." in response.text
+
+
 def test_bad_feedback_requires_correction() -> None:
     with TestClient(app) as client:
         response = client.post("/api/feedback", json={"message_id": "message", "rating": "bad"})

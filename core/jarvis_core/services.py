@@ -1,9 +1,10 @@
 import asyncio
 import base64
+import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 import edge_tts
@@ -14,10 +15,12 @@ from langdetect import DetectorFactory, LangDetectException, detect
 
 from jarvis_core.config import CoreSettings
 from jarvis_core.storage import Storage
+from jarvis_core.tools import ToolRegistry
 
 
 SYSTEM_PROMPT = """Eres JARVIS, un asistente personal preciso, discreto y útil.
-Responde en español salvo que el usuario pida otro idioma y dirígete a él como «señor» cuando resulte natural.
+Responde en el mismo idioma que use el usuario en su mensaje más reciente, salvo que pida expresamente otro idioma.
+Dirígete a él como «señor» (o el equivalente natural en ese idioma) cuando resulte apropiado.
 No inventes nunca hechos, ubicación, clima, agenda, vivienda, familia, posesiones ni acciones realizadas.
 No menciones mansiones, desayunos ni detalles personales que el usuario no haya proporcionado.
 Un saludo se responde con brevedad, sin añadir noticias, clima ni supuestos.
@@ -45,22 +48,45 @@ class OllamaService:
         self.base_url = settings.ollama_url.rstrip("/")
         self.model = settings.ollama_model
 
-    async def chat(self, messages: list[dict[str, str]], context: str | None = None) -> str:
+    def _payload(self, messages: list[dict[str, str]], context: str | None, stream: bool) -> dict[str, Any]:
         system_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         if context:
             system_messages.append({"role": "system", "content": context})
-        payload = {
+        return {
             "model": self.model,
             "messages": [*system_messages, *messages],
-            "stream": False,
+            "stream": stream,
             "keep_alive": "10m",
-            "options": {"temperature": 0.35, "num_predict": 220},
+            "options": {"temperature": 0.35, "num_predict": -1},
         }
-        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=5.0)) as client:
+
+    async def chat_stream(self, messages: list[dict[str, str]], context: str | None = None):
+        timeout = httpx.Timeout(180.0, connect=5.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST", f"{self.base_url}/api/chat", json=self._payload(messages, context, True)
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    content = str(data.get("message", {}).get("content", ""))
+                    if content:
+                        yield content
+
+    async def tool_decision(
+        self,
+        messages: list[dict[str, Any]],
+        context: str | None,
+        tools: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        payload = self._payload(messages, context, False)
+        payload["tools"] = tools
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=5.0)) as client:
             response = await client.post(f"{self.base_url}/api/chat", json=payload)
             response.raise_for_status()
-            data = response.json()
-        return str(data["message"]["content"])
+        return dict(response.json().get("message") or {})
 
     async def available(self) -> bool:
         try:
@@ -142,7 +168,8 @@ class TextToSpeechService:
         os.close(fd)
         path = Path(filename)
         try:
-            await edge_tts.Communicate(text=text, voice=await self._voice_for(language)).save(str(path))
+            detected_language = language or response_language(text)
+            await edge_tts.Communicate(text=text, voice=await self._voice_for(detected_language)).save(str(path))
             return path.read_bytes()
         finally:
             path.unlink(missing_ok=True)
@@ -155,6 +182,8 @@ class JarvisServices:
         self.ollama = OllamaService(settings)
         self.stt = SpeechToTextService(settings)
         self.tts = TextToSpeechService(settings)
+        self.tools = ToolRegistry()
+        self.tools.load_modules(settings.tool_modules)
         self._location_cache: dict[tuple[float, float], str] = {}
         self._geocode_lock = asyncio.Lock()
         self._last_geocode_at = 0.0
@@ -167,6 +196,7 @@ class JarvisServices:
                 "stt": f"faster-whisper/{self.settings.whisper_model}",
                 "tts": f"edge-tts/{self.settings.tts_voice}",
                 "memory": "sqlite",
+                "tools": ",".join(item["function"]["name"] for item in self.tools.definitions()) or "none",
             },
             "ollama_ready": await self.ollama.available(),
         }
@@ -187,18 +217,61 @@ class JarvisServices:
             return {"items": self.storage.memories(int(payload.get("limit", 50)))}
         if action == "feedback":
             feedback_id = self.storage.add_feedback(
-                str(payload["message_id"]), str(payload["rating"]), payload.get("correction")
+                str(payload["message_id"]), str(payload["rating"]), payload.get("correction"), payload.get("reason")
             )
-            return {"id": feedback_id, "stored": True}
+            return {"id": feedback_id, "stored": True, "reward": 1 if payload["rating"] == "good" else -1}
         raise ValueError(f"Unsupported action: {action}")
 
     async def _chat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        async def ignore_chunk(_chunk: str) -> None:
+            return None
+
+        return await self.chat_stream(payload, ignore_chunk)
+
+    async def chat_stream(
+        self,
+        payload: dict[str, Any],
+        on_chunk: Callable[[str], Awaitable[None]],
+    ) -> dict[str, Any]:
         message = str(payload["message"]).strip()
         conversation_id = str(payload.get("conversation_id") or uuid4())
         previous = self.storage.conversation(conversation_id, limit=20)
         context = await self._tool_context(message, payload.get("latitude"), payload.get("longitude"))
-        answer = await self.ollama.chat([*previous, {"role": "user", "content": message}], context)
-        language = response_language(answer, str(payload.get("language") or "es"))
+        user_language = str(payload.get("language") or response_language(message, "es"))
+        language_context = f"El idioma detectado del mensaje más reciente es «{user_language}». Responde en ese idioma salvo petición explícita en contrario."
+        context = f"{language_context}\n{context}" if context else language_context
+        conversation: list[dict[str, Any]] = [*previous, {"role": "user", "content": message}]
+        definitions = self.tools.definitions()
+        if definitions:
+            decision = await self.ollama.tool_decision(conversation, context, definitions)
+            tool_calls = list(decision.get("tool_calls") or [])
+            if tool_calls:
+                conversation.append(decision)
+                for call in tool_calls:
+                    function = dict(call.get("function") or {})
+                    name = str(function.get("name", ""))
+                    arguments = function.get("arguments") or {}
+                    if not isinstance(arguments, dict):
+                        arguments = json.loads(str(arguments))
+                    result = await self.tools.execute(name, arguments)
+                    conversation.append({"role": "tool", "tool_name": name, "content": result})
+            else:
+                answer = str(decision.get("content", "")).strip()
+                if answer:
+                    await on_chunk(answer)
+                return self._store_chat_result(conversation_id, message, answer, user_language)
+
+        chunks: list[str] = []
+        async for chunk in self.ollama.chat_stream(conversation, context):
+            chunks.append(chunk)
+            await on_chunk(chunk)
+        answer = "".join(chunks).strip()
+        return self._store_chat_result(conversation_id, message, answer, user_language)
+
+    def _store_chat_result(
+        self, conversation_id: str, message: str, answer: str, fallback_language: str
+    ) -> dict[str, Any]:
+        language = response_language(answer, fallback_language)
         self.storage.add_message(conversation_id, "user", message)
         message_id = self.storage.add_message(conversation_id, "assistant", answer)
         return {

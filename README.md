@@ -116,11 +116,12 @@ El token PC↔gateway no es un secret de Actions: vive solo en los dos `.env` de
 | `GET` | `/api/health` | Vida del gateway, aunque el PC esté apagado |
 | `GET` | `/api/status` | Conectividad y proveedores anunciados por el Core |
 | `POST` | `/api/chat` | Relay de conversación hacia Ollama en el PC |
+| `POST` | `/api/chat/stream` | Conversación incremental por SSE para texto y TTS simultáneos |
 | `POST` | `/api/audio` | Relay de audio hacia Whisper en el PC |
 | `POST` | `/api/tts` | Audio TTS generado desde el Core |
 | `GET` | `/api/memories` | Contrato de memorias explícitas |
 | `GET` | `/api/history` | Historial persistente para el dashboard |
-| `POST` | `/api/feedback` | Valoración y corrección para entrenamiento futuro |
+| `POST` | `/api/feedback` | Recompensa `+1/-1`, motivo y corrección para entrenamiento futuro |
 | WebSocket | `/ws` | Ping/chat compatible para clientes |
 | WebSocket | `/internal/core/ws` | Canal privado autenticado del Core; no es una API de navegador |
 
