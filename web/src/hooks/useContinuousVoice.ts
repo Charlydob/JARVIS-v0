@@ -8,7 +8,9 @@ interface ContinuousVoiceOptions {
 }
 
 const SILENCE_MS = 3000
-const VOICE_THRESHOLD = 0.025
+const MIN_VOICE_THRESHOLD = 0.012
+const NOISE_MULTIPLIER = 2.8
+const REQUIRED_VOICE_FRAMES = 3
 
 export function useContinuousVoice({ enabled, onListening, onUtterance, onError }: ContinuousVoiceOptions) {
   const callbacks = useRef({ onListening, onUtterance, onError })
@@ -44,11 +46,20 @@ export function useContinuousVoice({ enabled, onListening, onUtterance, onError 
         const samples = new Uint8Array(analyser.fftSize)
         let heardVoice = false
         let lastVoiceAt = 0
+        let noiseFloor = 0.006
+        let voiceFrames = 0
+        let containerHeader: Blob | undefined
         let preRoll: Blob[] = []
         const utterance: Blob[] = []
 
         recorder.ondataavailable = (event) => {
           if (!event.data.size) return
+          if (!containerHeader) {
+            // WebM/MP4 cannot be decoded without the initialization data in the first chunk.
+            containerHeader = event.data
+            if (heardVoice) utterance.push(event.data)
+            return
+          }
           if (heardVoice) utterance.push(event.data)
           else {
             preRoll.push(event.data)
@@ -57,7 +68,7 @@ export function useContinuousVoice({ enabled, onListening, onUtterance, onError 
         }
         recorder.onstop = () => {
           if (cancelled || !heardVoice || !utterance.length) return
-          const audio = new Blob([...preRoll, ...utterance], { type: recorder?.mimeType || 'audio/webm' })
+          const audio = new Blob(utterance, { type: recorder?.mimeType || 'audio/webm' })
           callbacks.current.onUtterance(audio)
         }
         recorder.start(250)
@@ -73,16 +84,24 @@ export function useContinuousVoice({ enabled, onListening, onUtterance, onError 
           }
           const rms = Math.sqrt(energy / samples.length)
           const now = performance.now()
-          if (rms >= VOICE_THRESHOLD) {
+          const threshold = Math.max(MIN_VOICE_THRESHOLD, noiseFloor * NOISE_MULTIPLIER)
+          if (rms >= threshold) {
+            voiceFrames += 1
             if (!heardVoice) {
-              heardVoice = true
-              utterance.push(...preRoll)
-              preRoll = []
+              if (voiceFrames >= REQUIRED_VOICE_FRAMES) {
+                heardVoice = true
+                if (containerHeader) utterance.push(containerHeader)
+                utterance.push(...preRoll)
+                preRoll = []
+              }
             }
-            lastVoiceAt = now
+            if (heardVoice) lastVoiceAt = now
           } else if (heardVoice && now - lastVoiceAt >= SILENCE_MS) {
             recorder.stop()
             return
+          } else {
+            voiceFrames = 0
+            noiseFloor = (noiseFloor * 0.98) + (rms * 0.02)
           }
           animationFrame = requestAnimationFrame(measure)
         }
