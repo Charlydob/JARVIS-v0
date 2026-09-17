@@ -403,3 +403,66 @@ La escritura mantiene dos rondas de Ollama porque debe extraer y validar argumen
 
 - Google Sheets queda expresamente como integración futura. BookShell continúa siendo la fuente principal.
 - La escritura genérica sigue dependiendo de una ronda de selección de Ollama; solo se aceleraron lecturas inequívocas para no introducir ejecuciones incorrectas.
+
+## Reliability + zero-hallucination tools + latency v2
+
+### Causas raíz
+
+- Escrituras falsas: las tools podían devolver una respuesta HTTP sin comprobar que el valor aparecía realmente en una lectura posterior. El modelo recibía ese resultado y aún podía redactar una confirmación positiva.
+- Recordatorios incompletos: la extracción general mediante Ollama no mantenía de forma determinista la fecha y el título entre el turno “clase el viernes” y la respuesta “a las 18”.
+- Loops y duplicados: el audio, el turno y los eventos SSE no compartían identificadores idempotentes; una reconexión o listener repetido podía volver a procesar una entrada ya resuelta.
+- Silencio: se enviaban grabaciones a Whisper sin un filtro obligatorio de duración, voz detectada y energía, y una transcripción repetida podía volver a entrar en conversación.
+- Etiqueta `assistant`: podía llegar como prefijo generado por Ollama o permanecer en datos históricos; la interfaz no la normalizaba.
+- Latencia: incluso las intenciones obvias de Books y Reminders pagaban selección de tool y una segunda generación de Ollama. Las escrituras de página también repetían lecturas que ya se habían realizado.
+
+### Correcciones
+
+- Las escrituras de página, recordatorio, gym, nota y gasto hacen `write → read-back`. El Core solo considera exitosa una tool de escritura si recibe `verified: true`; de lo contrario responde “No se pudo guardar, señor.”
+- Un router determinista resuelve libro actual, progreso, actualización de página, recordatorios de hoy y creación de recordatorios. Si falta fecha u hora pregunta únicamente el dato ausente. “El viernes” se resuelve al próximo viernes razonable y la aclaración siguiente conserva título y fecha.
+- Cada entrada usa `utterance_id`, cada petición `turn_id` y cada ejecución `tool_call_id`. Core memoriza resultados de audio/turno, comparte una petición ya en curso y la PWA descarta eventos SSE ya vistos.
+- El filtro de audio exige 500 ms de captura, 300 ms de voz, RMS mínimo `0.014` y 1000 bytes. También descarta vacío, ruido conocido y la misma transcripción repetida durante 8 segundos. Los logs registran `audio_duration`, `speech_ms`, `rms`, `transcript` y `discard_reason`.
+- El prefijo literal `assistant` se elimina al recibir el stream, antes de persistir y al renderizar historial o respuesta actual.
+- Las rutas comunes usan tool directa y plantilla breve, sin Ollama. El modelo se mantiene caliente durante la conexión y las fases STT, routing, selección, pre-LLM, TTFT/total de Ollama, tool, read-back, TTS y total quedan instrumentadas con el mismo `turn_id`.
+
+### Timings antes/después
+
+Tiempos reales observados por el usuario frente a la verificación final local contra BookShell real, en milisegundos:
+
+| Escenario | Antes total | Después TTFT / total |
+| --- | ---: | ---: |
+| Libro actual | 27.000 | 1.284 / 1.285 |
+| Página actual | 20.000 | 1.109 / 1.112 |
+| Actualizar página | 19.000 | 2.850 / 2.852 |
+| Recordatorios de hoy | 30.000 | 0.347 / 0.350 |
+| Crear recordatorio | 17.000 | 0.751 / 0.752 |
+| Conversación normal calentada | — | 0.356 / 1.180 |
+
+Las lecturas simples quedan por debajo de 2 s y las escrituras verificadas por debajo de 3 s en esta ejecución. Los tiempos dependen de red, Ollama y BookShell, pero cada fase queda registrada para localizar regresiones reales.
+
+### BookShell real y persistencia verificada
+
+- Libro actual: `Musashi`, id `-OzHVYhCmxL5Tdo_9Z9N`, página inicial 221.
+- Progreso: escritura real 221 → 220, lectura posterior confirmó 220; restauración 220 → 221, lectura posterior confirmó 221.
+- Recordatorio temporal: creado para `2099-12-30 23:41`, leído de vuelta con el mismo ID/fecha/hora y cancelado. La lectura final devolvió estado cancelado o ausencia, según el filtrado de BookShell.
+- Fallo controlado: una tool de recordatorio que lanza error produce `No se pudo guardar, señor.` y nunca contiene una confirmación de creación.
+
+El script reproducible es `scripts/verify_reliability_v2.py` y deja restaurada la página original y cancelada la fixture temporal.
+
+### Pruebas
+
+- Stress de 20 turnos consecutivos más silencio y transcripción duplicada: 0 respuestas duplicadas, 0 turnos fantasma, una sola ejecución por `turn_id` repetido y 0 confirmaciones de escritura sin `verified: true`.
+- Recordatorio multiturno: “Clase de alemán el viernes” pregunta la hora; “A las 18” crea argumentos completos conservando título y fecha.
+- Core: `32 passed`. Gateway: `10 passed`. Web: `6 passed`. ESLint y build TypeScript/Vite/PWA: correctos.
+
+### Archivos cambiados
+
+- Core: `core/jarvis_core/intents.py`, `services.py`, `main.py`, integraciones `bookshell.py` y `bookshell_domains.py`.
+- Gateway: `backend/app/models.py`, `main.py` y `relay.py`.
+- PWA: `web/src/App.tsx`, `web/src/api/client.ts` y `web/src/hooks/useContinuousVoice.ts`.
+- Pruebas y verificación: `core/tests/test_intents.py`, `test_reliability.py`, pruebas existentes actualizadas y `scripts/verify_reliability_v2.py`.
+
+### Commits y estado
+
+- Core/gateway: `f9ad202` (`fix: verify tool writes and deduplicate turns`).
+- PWA: `fb4c07d` (`fix: deduplicate voice and stream events`).
+- Este bloque documental forma el commit posterior inmediato. Google Sheets y animaciones avanzadas no se tocaron.
