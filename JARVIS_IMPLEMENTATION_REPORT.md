@@ -218,3 +218,54 @@ ssh -i C:\Users\carlo\.ssh\hetzner_ed25519 root@46.224.61.193 "cd /opt/jarvis; g
 - Rama: `main`.
 - El commit documental que contiene esta sección es el `HEAD` posterior inmediato.
 - Antes de añadir esta sección, el árbol estaba limpio y `origin/main` contenía el commit de implementación.
+
+## Feedback learning + BookShell integration
+
+### Cambios del TTS
+
+- La segmentación conserva frases completas y palabras, distingue límites de frase, párrafo y continuación, y aplica solo 15 ms tras una frase y 120 ms tras un párrafo.
+- La nueva cola desacopla preparación y reproducción: sintetiza ordenadamente el segmento siguiente mientras suena el actual, pero mantiene una única reproducción activa y respeta el orden original.
+- El texto continúa hablándose de forma incremental; no se espera a que termine de generarse la respuesta completa.
+
+### Recuperación de feedback
+
+- Antes de responder se consultan hasta 50 valoraciones recientes, pero se inyectan como máximo tres ejemplos pertinentes.
+- Como el Ollama local devuelve `501 Not Implemented` para `/api/embed`, un selector semántico separado basado en el propio modelo compara la petición nueva con las peticiones valoradas. Si ese selector falla, se usa similitud léxica como fallback.
+- Una valoración positiva aporta un ejemplo aprobado. Una negativa aporta la respuesta que debe evitarse, el motivo y la corrección preferida, sin convertir esa corrección en una respuesta universal fija.
+- El módulo está desacoplado mediante un selector inyectable para sustituirlo posteriormente por embeddings, preference training o fine-tuning.
+- El logger `jarvis-core.feedback` registra modo, número de candidatos, IDs recuperados y petición cuando el mecanismo se utiliza.
+
+### Tools de BookShell
+
+- `bookshell_get_current_book`: consulta el libro activo o actualizado más recientemente y su progreso real.
+- `bookshell_update_progress`: actualiza la página mediante transacción, ajusta el estado del libro y mantiene el registro diario de lectura. Permite título aproximado y devuelve candidatos si existe ambigüedad.
+- `bookshell_create_reminder`: crea un recordatorio canónico con fecha, hora, zona horaria y aviso previo.
+- APIs existentes utilizadas: `GET /data/books/books`, `POST /data/transaction/books/books/{id}`, `GET /data/books/readingLog/{date}/{id}`, `POST /data/transaction/books/readingLog/{date}/{id}` y `POST /reminders` en `https://api-bookshell.charlydob.com`.
+- Las descripciones de las herramientas permiten a Ollama decidirlas desde lenguaje natural; el resultado ejecutado se vuelve a insertar como dato autoritativo para impedir que el modelo lo ignore al redactar.
+
+### Pruebas reales
+
+- TTS Edge real: 12 segmentos breves, incluyendo cambio de párrafo; 194.832 bytes generados, media de síntesis de 0,97 s por segmento. La prueba de cola confirmó precarga durante la primera reproducción, orden íntegro y cero solapamientos.
+- Feedback controlado con SQLite temporal y Ollama real: una corrección negativa se recuperó tanto para la pregunta exacta como para la variante semántica “Sintetiza este email de trabajo en puntos claros”, y quedó presente en el contexto.
+- BookShell real: se consultó `Musashi 1: Earth, water and fire.` en página 221, se actualizó a 222, una segunda consulta confirmó persistencia y se restauró a 221; ambas variaciones actualizaron correctamente el reading log.
+- Tool calling real: Ollama eligió respectivamente `bookshell_get_current_book`, `bookshell_update_progress` y `bookshell_create_reminder` para tres expresiones naturales. El flujo completo devolvió el título real y la página 221.
+- Gateway: `10 passed`. Core: `12 passed`. Web/Vitest: `6 passed`. ESLint y build TypeScript/Vite/PWA: correctos.
+
+### Limitaciones
+
+- La mejora elimina la espera de síntesis entre pistas, pero la pausa exacta percibida también depende del silencio incorporado por Edge TTS y del búfer/reproductor de Safari; debe confirmarse auditivamente en el iPhone tras actualizar la PWA.
+- La selección semántica añade una inferencia breve de Ollama cuando hay feedback disponible. La interfaz permite cambiar a embeddings cuando el servidor local exponga un modelo compatible.
+- La API actual de BookShell declara modo de usuario único con autenticación desactivada. El adaptador admite `JARVIS_BOOKSHELL_API_TOKEN` para cuando se active Bearer auth, pero la protección definitiva debe habilitarse en BookShell.
+- No se creó un recordatorio de prueba real para evitar una notificación basura; se validaron su endpoint y cuerpo canónico con prueba automatizada, y Ollama seleccionó la tool real correctamente.
+
+### Archivos modificados
+
+- `web/src/App.tsx`, `web/src/speech.ts`, `web/src/speechQueue.ts` y sus pruebas.
+- `core/jarvis_core/feedback.py`, `storage.py`, `services.py` y sus pruebas.
+- `core/jarvis_core/integrations/bookshell.py`, `.env.example`, `core/requirements.txt` y pruebas de integración.
+
+### Commit y git status
+
+- Implementación: `2e5d89c` (`feat: learn from feedback and connect BookShell`).
+- Rama: `main`.
+- Antes de añadir esta sección documental, `git status` estaba limpio. El commit documental que contiene esta sección es el `HEAD` posterior inmediato.
