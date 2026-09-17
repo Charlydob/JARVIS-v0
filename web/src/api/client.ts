@@ -10,6 +10,7 @@ export interface ChatResponse {
   provider: string
   conversation_id: string
   message_id: string
+  language?: string
 }
 
 export interface HistoryItem {
@@ -54,30 +55,30 @@ export async function getStatus(): Promise<StatusResponse> {
 
 export interface UserLocation { latitude: number; longitude: number }
 
-export async function sendMessage(message: string, conversationId?: string, location?: UserLocation): Promise<ChatResponse> {
+export async function sendMessage(message: string, conversationId?: string, location?: UserLocation, language?: string): Promise<ChatResponse> {
   return (await checked(await timedFetch(`${apiUrl}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, conversation_id: conversationId, ...location })
+    body: JSON.stringify({ message, conversation_id: conversationId, ...location, language })
   }))).json() as Promise<ChatResponse>
 }
 
-export async function transcribeAudio(audio: Blob): Promise<string> {
+export async function transcribeAudio(audio: Blob): Promise<{ transcript: string; language?: string }> {
   const form = new FormData()
   const extension = audio.type.includes('mp4') || audio.type.includes('m4a') || audio.type.includes('aac')
     ? 'm4a'
     : audio.type.includes('ogg') ? 'ogg' : 'webm'
   form.append('file', audio, `utterance.${extension}`)
   const response = await checked(await timedFetch(`${apiUrl}/api/audio`, { method: 'POST', body: form }))
-  const body = await response.json() as { transcript: string }
-  return body.transcript.trim()
+  const body = await response.json() as { transcript: string; language?: string }
+  return { transcript: body.transcript.trim(), language: body.language }
 }
 
-export async function synthesizeSpeech(text: string): Promise<Blob> {
+export async function synthesizeSpeech(text: string, language?: string): Promise<Blob> {
   const response = await checked(await timedFetch(`${apiUrl}/api/tts`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: text })
+    body: JSON.stringify({ message: text, language })
   }, 45_000))
   return response.blob()
 }

@@ -176,20 +176,20 @@ export default function App() {
     if (view === 'dashboard') void refreshHistory()
   }, [view, refreshHistory])
 
-  const runConversation = useCallback(async (message: string) => {
+  const runConversation = useCallback(async (message: string, language?: string) => {
     const cleanMessage = message.trim()
     if (!cleanMessage || !coreOnline) return
     dispatch({ type: 'SUBMIT' })
     setNotice(cleanMessage)
     try {
-      const response = await sendMessage(cleanMessage, conversationId.current, location)
+      const response = await sendMessage(cleanMessage, conversationId.current, location, language)
       conversationId.current = response.conversation_id
       setNotice(response.message)
       dispatch({ type: 'RESPONSE' })
       void refreshHistory()
       if (soundEnabled && voiceReady && !muted) {
         try {
-          const speech = await synthesizeSpeech(response.message)
+          const speech = await synthesizeSpeech(response.message, response.language || language)
           await playAudio(speech)
         } catch {
           setVoiceReady(false)
@@ -229,13 +229,13 @@ export default function App() {
     dispatch({ type: 'SUBMIT' })
     setNotice('Transcribiendo…')
     try {
-      const transcript = await transcribeAudio(audio)
-      if (!transcript) {
+      const transcription = await transcribeAudio(audio)
+      if (!transcription.transcript) {
         setNotice('Estoy escuchando')
         dispatch({ type: 'EMPTY_AUDIO' })
         return
       }
-      await runConversation(transcript)
+      await runConversation(transcription.transcript, transcription.language)
     } catch (error) {
       console.warn('No se pudo transcribir la grabación', error)
       setNotice('No he podido entenderte. Sigo escuchando.')
@@ -245,6 +245,7 @@ export default function App() {
 
   useContinuousVoice({
     enabled: coreOnline && !muted && !busy && view === 'face' && state !== 'error',
+    retainMicrophone: coreOnline && !muted && view === 'face' && state !== 'error',
     onListening: useCallback(() => dispatch({ type: 'START_LISTENING' }), []),
     onUtterance: useCallback((audio) => { void processAudio(audio) }, [processAudio]),
     onError: useCallback((message) => { setNotice(message); dispatch({ type: 'FAIL' }) }, [])

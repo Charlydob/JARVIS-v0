@@ -85,7 +85,7 @@ async def audio(request: Request, file: UploadFile = File(...)) -> AudioResponse
 @app.post("/api/tts", tags=["conversation"])
 async def tts(payload: ChatRequest, request: Request) -> Response:
     try:
-        result = await relay(request).request("tts", {"text": payload.message})
+        result = await relay(request).request("tts", {"text": payload.message, "language": payload.language})
         raw = base64.b64decode(str(result["data"]), validate=True)
         return Response(content=raw, media_type=str(result.get("content_type", "audio/mpeg")))
     except (CoreOfflineError, CoreRequestError, KeyError, ValueError) as exc:

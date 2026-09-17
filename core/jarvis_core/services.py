@@ -8,7 +8,9 @@ from uuid import uuid4
 
 import edge_tts
 import httpx
+from edge_tts import VoicesManager
 from faster_whisper import WhisperModel
+from langdetect import DetectorFactory, LangDetectException, detect
 
 from jarvis_core.config import CoreSettings
 from jarvis_core.storage import Storage
@@ -23,6 +25,19 @@ Si necesitas información actual y no aparece en un contexto de herramienta, di 
 
 WEATHER_WORDS = ("tiempo", "clima", "lluv", "temperatura", "frío", "frio", "calor", "nubl", "pronóstico", "pronostico", "previsión", "prevision")
 LOCATION_WORDS = ("dónde estamos", "donde estamos", "dónde estoy", "donde estoy", "ubicación", "ubicacion", "localización", "localizacion")
+PREFERRED_VOICE_LOCALES = {
+    "ar": "ar-SA", "ca": "ca-ES", "de": "de-DE", "en": "en-GB", "es": "es-ES",
+    "fr": "fr-FR", "it": "it-IT", "ja": "ja-JP", "ko": "ko-KR", "nl": "nl-NL",
+    "pl": "pl-PL", "pt": "pt-PT", "ru": "ru-RU", "zh": "zh-CN",
+}
+DetectorFactory.seed = 0
+
+
+def response_language(text: str, fallback: str | None = None) -> str:
+    try:
+        return detect(text)
+    except LangDetectException:
+        return fallback or "es"
 
 
 class OllamaService:
@@ -69,7 +84,7 @@ class SpeechToTextService:
             self._model = WhisperModel(self.model_name, device=self.device, compute_type=self.compute_type)
         return self._model
 
-    async def transcribe(self, raw: bytes, content_type: str) -> str:
+    async def transcribe(self, raw: bytes, content_type: str) -> tuple[str, str]:
         suffix = (
             ".webm" if "webm" in content_type
             else ".ogg" if "ogg" in content_type
@@ -87,30 +102,47 @@ class SpeechToTextService:
         finally:
             path.unlink(missing_ok=True)
 
-    def _transcribe_file(self, path: Path) -> str:
-        segments, _ = self._load().transcribe(
+    def _transcribe_file(self, path: Path) -> tuple[str, str]:
+        segments, info = self._load().transcribe(
             str(path),
-            language="es",
             beam_size=5,
             temperature=0.0,
             condition_on_previous_text=False,
-            initial_prompt="Conversación clara en español con un asistente llamado JARVIS.",
+            initial_prompt="JARVIS",
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 450},
         )
-        return " ".join(segment.text.strip() for segment in segments).strip()
+        return " ".join(segment.text.strip() for segment in segments).strip(), info.language
 
 
 class TextToSpeechService:
     def __init__(self, settings: CoreSettings) -> None:
         self.voice = settings.tts_voice
+        self._voices: VoicesManager | None = None
+        self._voices_lock = asyncio.Lock()
 
-    async def synthesize(self, text: str) -> bytes:
+    async def _voice_for(self, language: str | None) -> str:
+        language_code = (language or "es").split("-", 1)[0].lower()
+        if language_code == "es":
+            return self.voice
+        try:
+            async with self._voices_lock:
+                if self._voices is None:
+                    self._voices = await VoicesManager.create()
+            locale = PREFERRED_VOICE_LOCALES.get(language_code)
+            choices = self._voices.find(Locale=locale, Gender="Male") if locale else []
+            if not choices:
+                choices = self._voices.find(Language=language_code, Gender="Male")
+            return str(choices[0]["ShortName"]) if choices else self.voice
+        except (IndexError, KeyError, RuntimeError):
+            return self.voice
+
+    async def synthesize(self, text: str, language: str | None = None) -> bytes:
         fd, filename = tempfile.mkstemp(suffix=".mp3")
         os.close(fd)
         path = Path(filename)
         try:
-            await edge_tts.Communicate(text=text, voice=self.voice).save(str(path))
+            await edge_tts.Communicate(text=text, voice=await self._voice_for(language)).save(str(path))
             return path.read_bytes()
         finally:
             path.unlink(missing_ok=True)
@@ -144,10 +176,10 @@ class JarvisServices:
             return await self._chat(payload)
         if action == "audio":
             raw = base64.b64decode(str(payload["data"]), validate=True)
-            transcript = await self.stt.transcribe(raw, str(payload.get("content_type", "audio/webm")))
-            return {"transcript": transcript, "provider": "faster-whisper", "detail": "complete"}
+            transcript, language = await self.stt.transcribe(raw, str(payload.get("content_type", "audio/webm")))
+            return {"transcript": transcript, "language": language, "provider": "faster-whisper", "detail": "complete"}
         if action == "tts":
-            raw = await self.tts.synthesize(str(payload["text"]))
+            raw = await self.tts.synthesize(str(payload["text"]), payload.get("language"))
             return {"data": base64.b64encode(raw).decode("ascii"), "content_type": "audio/mpeg"}
         if action == "history":
             return {"items": self.storage.history(int(payload.get("limit", 100)))}
@@ -166,6 +198,7 @@ class JarvisServices:
         previous = self.storage.conversation(conversation_id, limit=20)
         context = await self._tool_context(message, payload.get("latitude"), payload.get("longitude"))
         answer = await self.ollama.chat([*previous, {"role": "user", "content": message}], context)
+        language = response_language(answer, str(payload.get("language") or "es"))
         self.storage.add_message(conversation_id, "user", message)
         message_id = self.storage.add_message(conversation_id, "assistant", answer)
         return {
@@ -173,6 +206,7 @@ class JarvisServices:
             "provider": "ollama",
             "conversation_id": conversation_id,
             "message_id": message_id,
+            "language": language,
         }
 
     async def _tool_context(self, message: str, latitude: Any, longitude: Any) -> str | None:

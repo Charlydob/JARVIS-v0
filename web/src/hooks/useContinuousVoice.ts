@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 
 interface ContinuousVoiceOptions {
   enabled: boolean
+  retainMicrophone: boolean
   onListening: () => void
   onUtterance: (audio: Blob) => void
   onError: (message: string) => void
@@ -12,9 +13,18 @@ const MIN_VOICE_THRESHOLD = 0.012
 const NOISE_MULTIPLIER = 2.8
 const REQUIRED_VOICE_FRAMES = 3
 
-export function useContinuousVoice({ enabled, onListening, onUtterance, onError }: ContinuousVoiceOptions) {
+export function useContinuousVoice({ enabled, retainMicrophone, onListening, onUtterance, onError }: ContinuousVoiceOptions) {
   const callbacks = useRef({ onListening, onUtterance, onError })
+  const streamRef = useRef<MediaStream>()
+  const retainRef = useRef(retainMicrophone)
   callbacks.current = { onListening, onUtterance, onError }
+  retainRef.current = retainMicrophone
+
+  useEffect(() => {
+    if (retainMicrophone) return
+    streamRef.current?.getTracks().forEach((track) => track.stop())
+    streamRef.current = undefined
+  }, [retainMicrophone])
 
   useEffect(() => {
     if (!enabled) return
@@ -27,9 +37,13 @@ export function useContinuousVoice({ enabled, onListening, onUtterance, onError 
 
     const start = async () => {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-        })
+        const retained = streamRef.current
+        stream = retained?.getAudioTracks().some((track) => track.readyState === 'live')
+          ? retained
+          : await navigator.mediaDevices.getUserMedia({
+              audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+            })
+        streamRef.current = stream
         if (cancelled) {
           stream.getTracks().forEach((track) => track.stop())
           return
@@ -119,7 +133,10 @@ export function useContinuousVoice({ enabled, onListening, onUtterance, onError 
       cancelled = true
       cancelAnimationFrame(animationFrame)
       if (recorder?.state === 'recording') recorder.stop()
-      stream?.getTracks().forEach((track) => track.stop())
+      if (!retainRef.current) {
+        stream?.getTracks().forEach((track) => track.stop())
+        streamRef.current = undefined
+      }
       void context?.close()
     }
   }, [enabled])
