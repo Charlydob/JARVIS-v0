@@ -122,5 +122,29 @@ class Storage:
             )
         return feedback_id
 
+    def feedback_examples(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT f.id AS feedback_id, f.rating, f.reward, f.reason, f.correction, f.created_at,
+                   assistant.content AS assistant_response,
+                   (
+                       SELECT user.content
+                       FROM messages user
+                       WHERE user.conversation_id = assistant.conversation_id
+                         AND user.role = 'user'
+                         AND user.rowid < assistant.rowid
+                       ORDER BY user.rowid DESC
+                       LIMIT 1
+                   ) AS user_message
+            FROM feedback f
+            JOIN messages assistant ON assistant.id = f.message_id
+            WHERE assistant.role = 'assistant'
+            ORDER BY f.created_at DESC, f.rowid DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows if row["user_message"]]
+
     def close(self) -> None:
         self.connection.close()

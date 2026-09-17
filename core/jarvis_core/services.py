@@ -16,6 +16,7 @@ from faster_whisper import WhisperModel
 from langdetect import DetectorFactory, LangDetectException, detect
 
 from jarvis_core.config import CoreSettings
+from jarvis_core.feedback import FeedbackLearning
 from jarvis_core.storage import Storage
 from jarvis_core.tools import ToolRegistry
 
@@ -105,6 +106,33 @@ class OllamaService:
             return response.is_success
         except httpx.HTTPError:
             return False
+
+    async def select_feedback(self, query: str, examples: list[dict[str, Any]]) -> list[str]:
+        compact = [
+            {"id": item["feedback_id"], "request": item["user_message"]}
+            for item in examples
+        ]
+        prompt = (
+            "Select at most 3 past requests that are semantically relevant to the new request. "
+            "Match intent or topic even when wording differs. Do not select merely because both are greetings. "
+            "Return strict JSON only as {\"ids\":[...]}.\n"
+            f"NEW REQUEST: {query}\nPAST REQUESTS: {json.dumps(compact, ensure_ascii=False)}"
+        )
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "format": "json",
+            "keep_alive": "10m",
+            "options": {"temperature": 0, "num_predict": 120},
+        }
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=5.0)) as client:
+            response = await client.post(f"{self.base_url}/api/chat", json=payload)
+            response.raise_for_status()
+        content = str(response.json().get("message", {}).get("content", "{}"))
+        parsed = json.loads(content)
+        allowed = {str(item["feedback_id"]) for item in examples}
+        return [str(item) for item in parsed.get("ids", []) if str(item) in allowed][:3]
 
 
 class SpeechToTextService:
@@ -202,6 +230,7 @@ class JarvisServices:
         self.tts = TextToSpeechService(settings)
         self.tools = ToolRegistry()
         self.tools.load_modules(settings.tool_modules)
+        self.feedback = FeedbackLearning(self.storage, self.ollama.select_feedback)
         self._location_cache: dict[tuple[float, float], str] = {}
         self._geocode_lock = asyncio.Lock()
         self._last_geocode_at = 0.0
@@ -272,6 +301,7 @@ class JarvisServices:
         conversation_id = str(payload.get("conversation_id") or uuid4())
         previous = self.storage.conversation(conversation_id, limit=20)
         context = await self._tool_context(message, payload.get("latitude"), payload.get("longitude"))
+        feedback_context = await self.feedback.context_for(message)
         user_language = str(payload.get("language") or response_language(message, "es"))
         language_name = LANGUAGE_NAMES.get(user_language.split("-", 1)[0].lower(), user_language)
         language_context = (
@@ -279,7 +309,12 @@ class JarvisServices:
             f"Answer the user's latest message entirely in {language_name}. "
             "Do not answer in Spanish unless the required output language is Spanish or the user explicitly asks for Spanish."
         )
-        context = f"{language_context}\n{context}" if context else language_context
+        context_parts = [language_context]
+        if feedback_context:
+            context_parts.append(feedback_context)
+        if context:
+            context_parts.append(context)
+        context = "\n".join(context_parts)
         conversation: list[dict[str, Any]] = [*previous, {"role": "user", "content": message}]
         definitions = self.tools.definitions()
         if definitions:
@@ -287,6 +322,7 @@ class JarvisServices:
             tool_calls = list(decision.get("tool_calls") or [])
             if tool_calls:
                 conversation.append(decision)
+                authoritative_results: list[str] = []
                 for call in tool_calls:
                     function = dict(call.get("function") or {})
                     name = str(function.get("name", ""))
@@ -295,6 +331,15 @@ class JarvisServices:
                         arguments = json.loads(str(arguments))
                     result = await self.tools.execute(name, arguments)
                     conversation.append({"role": "tool", "tool_name": name, "content": result})
+                    authoritative_results.append(f"{name}: {result}")
+                conversation.append({
+                    "role": "system",
+                    "content": (
+                        "AUTHORITATIVE TOOL RESULTS (the requested actions/queries have already run; "
+                        "answer from these results and never claim the data is unavailable):\n"
+                        + "\n".join(authoritative_results)
+                    ),
+                })
             else:
                 answer = str(decision.get("content", "")).strip()
                 if answer:

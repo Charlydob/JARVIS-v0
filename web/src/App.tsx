@@ -16,6 +16,7 @@ import { JarvisFace } from './components/JarvisFace'
 import { useContinuousVoice } from './hooks/useContinuousVoice'
 import { JarvisState, stateLabels, transition } from './state/machine'
 import { takeSpeechSegments } from './speech'
+import { PrefetchedSpeechQueue } from './speechQueue'
 
 type View = 'face' | 'dashboard'
 
@@ -213,18 +214,17 @@ export default function App() {
       let speechBuffer = ''
       let responseStarted = false
       let speechFailed = false
-      let speechQueue = Promise.resolve()
+      const speechQueue = new PrefetchedSpeechQueue<Blob>({
+        synthesize: (text) => synthesizeSpeech(text, language),
+        play: (speech) => playAudio(speech, setAudioPlaying),
+        onError: () => { speechFailed = true },
+      })
 
       const queueSpeech = (flush = false) => {
         if (!shouldSpeak) return
         const split = takeSpeechSegments(speechBuffer, flush)
         speechBuffer = split.remainder
-        for (const segment of split.segments) {
-          speechQueue = speechQueue.then(async () => {
-            const speech = await synthesizeSpeech(segment)
-            await playAudio(speech, setAudioPlaying)
-          }).catch(() => { speechFailed = true })
-        }
+        for (const segment of split.segments) speechQueue.enqueue(segment)
       }
 
       const response = await streamMessage(cleanMessage, conversationId.current, location, language, (chunk) => {
@@ -247,7 +247,7 @@ export default function App() {
       void refreshHistory()
       if (shouldSpeak) {
         queueSpeech(true)
-        await speechQueue
+        await speechQueue.drain()
         if (speechFailed) {
           setVoiceReady(false)
           setNotice(`${fullText}\nToca la boca para volver a activar la voz.`)
