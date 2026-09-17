@@ -269,3 +269,77 @@ ssh -i C:\Users\carlo\.ssh\hetzner_ed25519 root@46.224.61.193 "cd /opt/jarvis; g
 - Implementación: `2e5d89c` (`feat: learn from feedback and connect BookShell`).
 - Rama: `main`.
 - Antes de añadir esta sección documental, `git status` estaba limpio. El commit documental que contiene esta sección es el `HEAD` posterior inmediato.
+
+## Full Bookshell integration
+
+### Módulos integrados
+
+- Books, Gym, Habits, Finance, Reminders/agenda, World/ubicaciones, Notes y Recipes.
+- BookShell sigue siendo la fuente de verdad; JARVIS consulta o modifica sus rutas existentes y no duplica estos datos en `memory.db`.
+
+### Tools disponibles
+
+- Books: `bookshell_books_query`, `bookshell_update_progress`.
+- Gym: `bookshell_gym_query`, `bookshell_gym_write`.
+- Habits: `bookshell_habits_query`, `bookshell_habits_mark`.
+- Finance: `bookshell_finance_query`, `bookshell_finance_create`.
+- Reminders: `bookshell_create_reminder`, `bookshell_reminders_query`, `bookshell_reminder_update`.
+- World: `bookshell_world_query`, `bookshell_world_write`.
+- Notes: `bookshell_notes_query`, `bookshell_notes_write`.
+- Recipes: `bookshell_recipes_query`, `bookshell_recipes_write`.
+- El catálogo completo de parámetros, riesgos y ejemplos está en `docs/bookshell-tools.md`.
+
+### Endpoints y rutas usados
+
+- Datos persistentes: `GET/PUT/PATCH/DELETE /data/{path}` y `POST /data/transaction/{path}`.
+- Raíces: `/data/books`, `/data/gym/gym`, `/data/habits`, `/data/finance/finance`, `/data/world`, `/data/notes` y `/data/recipes`.
+- Finanzas: `POST /shortcuts/finance/movements` con Bearer token e `Idempotency-Key`.
+- Agenda: `GET/POST /reminders` y `PATCH/DELETE /reminders/{id}`.
+
+### Operaciones read/write
+
+- Books lee libro activo/búsquedas/progreso/porcentaje/estado/última lectura/historial/citas y actualiza página, estado y reading log.
+- Gym lee sesiones, ejercicios, series, repeticiones, pesos y días desde el último entrenamiento; crea sesiones y actualiza sesiones identificadas.
+- Habits lista y calcula estado, valor, racha, progreso, última realización y pendientes; escribe checks, conteos y tiempo.
+- Finance lee cuentas, saldo, categorías, movimientos y agregados por periodo; prepara gastos, ingresos y transferencias mediante el endpoint idempotente protegido.
+- Reminders crea, busca, filtra, reprograma, completa y cancela recordatorios con `Europe/Zurich`.
+- World busca y guarda/actualiza lugares, locales y geografía. Notes y Recipes permiten búsqueda/recientes y creación/actualización básica.
+
+### Reglas de confirmación
+
+- Sin confirmación: lecturas; actualizar página; marcar/completar hábitos; crear recordatorio; registrar una sesión de gym; crear nota, receta o lugar cuando la intención es inequívoca.
+- Confirmación obligatoria: cancelar recordatorios y desmarcar hábitos.
+- Las eliminaciones destructivas no se exponen como tools. Finance pide una sola aclaración si cuenta/categoría/origen/destino no son inequívocos y falla cerrado si falta el token.
+- Un pre-router por dominio reduce el catálogo antes de que Ollama elija la acción; no ejecuta por palabras clave, solo evita colisiones entre tools no relacionadas.
+
+### Pruebas realizadas
+
+- Datos reales: Books 221→222→221 con persistencia y restauración; Gym devolvió la sesión del 2026-08-26 y 22 días; Habits devolvió 49 hábitos y estado/racha; Finance devolvió 13 cuentas y 70 categorías; World 207 registros; Notes 127; Recipes 15.
+- Reminder real temporal: creado para 2099, consultado por título y eliminado con `200`, sin dejar fixture.
+- Finance real: la ruta protegida devolvió `401` sin el token completo, confirmando el bloqueo. Una fixture controlada validó cuerpo, resolución e `Idempotency-Key` sin crear un movimiento real.
+- Routing natural correcto para ocho lecturas y cinco escrituras, incluyendo “Laura guardia”, “sin gym”, “último gasto”, “página 317”, “marca Alemán” y “24 francos en Migros”.
+- End-to-end Core: “¿Cuántos días llevo sin ir al gimnasio?” consultó BookShell y respondió 22 días.
+- Gateway `10 passed`; Core `19 passed`; Web `6 passed`; ESLint y build PWA correctos.
+
+### Limitaciones reales
+
+- El token completo de Shortcuts existente no se puede recuperar: BookShell solo conserva el hash y muestra prefijo/últimos caracteres. Para activar escrituras financieras hay que copiar un token completo en `JARVIS_BOOKSHELL_API_TOKEN`; no se rotó el token actual para no romper el Shortcut del iPhone.
+- BookShell mantiene actualmente `auth: disabled-single-user` en las rutas genéricas; Finance Shortcuts sí exige Bearer token. La autenticación global debe endurecerse en BookShell, no duplicarse en JARVIS.
+- La escritura avanzada de Gym no reconstruye plantillas ni edita arbitrariamente sets históricos; la tool crea sesiones compatibles y permite actualización básica sin exponer borrado.
+
+### Archivos modificados
+
+- `.env.example`.
+- `core/jarvis_core/integrations/bookshell.py` y `bookshell_domains.py`.
+- `core/jarvis_core/services.py` y `tools.py`.
+- `core/tests/test_bookshell_domains.py` y `test_tools.py`.
+- `docs/bookshell-tools.md`.
+
+### Commit final
+
+- Implementación: `87ab6bf` (`feat: integrate full BookShell tool catalog`).
+- La sección documental forma el commit posterior inmediato.
+
+### Git status
+
+- Rama `main`; árbol limpio antes de añadir esta sección documental.
