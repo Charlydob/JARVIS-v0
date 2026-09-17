@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import logging
 import os
 import re
 import tempfile
@@ -35,6 +36,11 @@ PREFERRED_VOICE_LOCALES = {
     "pl": "pl-PL", "pt": "pt-PT", "ru": "ru-RU", "zh": "zh-CN",
 }
 DetectorFactory.seed = 0
+LOGGER = logging.getLogger("jarvis-core.audio")
+LANGUAGE_NAMES = {
+    "de": "German", "en": "English", "es": "Spanish", "fr": "French",
+    "it": "Italian", "pt": "Portuguese",
+}
 
 
 def response_language(text: str, fallback: str | None = None) -> str:
@@ -114,7 +120,7 @@ class SpeechToTextService:
             self._model = WhisperModel(self.model_name, device=self.device, compute_type=self.compute_type)
         return self._model
 
-    async def transcribe(self, raw: bytes, content_type: str) -> tuple[str, str]:
+    async def transcribe(self, raw: bytes, content_type: str) -> tuple[str, str, dict[str, Any]]:
         suffix = (
             ".webm" if "webm" in content_type
             else ".ogg" if "ogg" in content_type
@@ -132,7 +138,7 @@ class SpeechToTextService:
         finally:
             path.unlink(missing_ok=True)
 
-    def _transcribe_file(self, path: Path) -> tuple[str, str]:
+    def _transcribe_file(self, path: Path) -> tuple[str, str, dict[str, Any]]:
         segments, info = self._load().transcribe(
             str(path),
             beam_size=5,
@@ -142,7 +148,13 @@ class SpeechToTextService:
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 450},
         )
-        return " ".join(segment.text.strip() for segment in segments).strip(), info.language
+        transcript = " ".join(segment.text.strip() for segment in segments).strip()
+        metadata = {
+            "decoded_duration_s": round(float(getattr(info, "duration", 0.0) or 0.0), 3),
+            "duration_after_vad_s": round(float(getattr(info, "duration_after_vad", 0.0) or 0.0), 3),
+            "language_probability": round(float(getattr(info, "language_probability", 0.0) or 0.0), 3),
+        }
+        return transcript, info.language, metadata
 
 
 class TextToSpeechService:
@@ -172,7 +184,9 @@ class TextToSpeechService:
         os.close(fd)
         path = Path(filename)
         try:
-            detected_language = language or response_language(text)
+            # The hint is only a fallback. The selected voice must follow the
+            # language of the text that will actually be spoken.
+            detected_language = response_language(text, language)
             await edge_tts.Communicate(text=text, voice=await self._voice_for(detected_language)).save(str(path))
             return path.read_bytes()
         finally:
@@ -210,13 +224,30 @@ class JarvisServices:
             return await self._chat(payload)
         if action == "audio":
             raw = base64.b64decode(str(payload["data"]), validate=True)
-            transcript, language = await self.stt.transcribe(raw, str(payload.get("content_type", "audio/webm")))
+            content_type = str(payload.get("content_type", "audio/webm"))
+            LOGGER.info(
+                "Audio received: bytes=%d content_type=%s capture_ms=%s speech_ms=%s",
+                len(raw), content_type, payload.get("duration_ms"), payload.get("speech_ms"),
+            )
+            transcript, language, metadata = await self.stt.transcribe(raw, content_type)
+            LOGGER.info(
+                "Whisper result: language=%s probability=%s decoded_s=%s after_vad_s=%s transcript=%r",
+                language,
+                metadata["language_probability"],
+                metadata["decoded_duration_s"],
+                metadata["duration_after_vad_s"],
+                transcript,
+            )
+            if not transcript:
+                LOGGER.warning("Audio discarded after Whisper: empty transcript")
             return {"transcript": transcript, "language": language, "provider": "faster-whisper", "detail": "complete"}
         if action == "tts":
             raw = await self.tts.synthesize(str(payload["text"]), payload.get("language"))
             return {"data": base64.b64encode(raw).decode("ascii"), "content_type": "audio/mpeg"}
         if action == "history":
             return {"items": self.storage.history(int(payload.get("limit", 100)))}
+        if action == "stats":
+            return self.storage.stats()
         if action == "memories":
             return {"items": self.storage.memories(int(payload.get("limit", 50)))}
         if action == "feedback":
@@ -242,7 +273,12 @@ class JarvisServices:
         previous = self.storage.conversation(conversation_id, limit=20)
         context = await self._tool_context(message, payload.get("latitude"), payload.get("longitude"))
         user_language = str(payload.get("language") or response_language(message, "es"))
-        language_context = f"El idioma detectado del mensaje más reciente es «{user_language}». Responde en ese idioma salvo petición explícita en contrario."
+        language_name = LANGUAGE_NAMES.get(user_language.split("-", 1)[0].lower(), user_language)
+        language_context = (
+            f"OUTPUT LANGUAGE REQUIREMENT: {language_name} ({user_language}). "
+            f"Answer the user's latest message entirely in {language_name}. "
+            "Do not answer in Spanish unless the required output language is Spanish or the user explicitly asks for Spanish."
+        )
         context = f"{language_context}\n{context}" if context else language_context
         conversation: list[dict[str, Any]] = [*previous, {"role": "user", "content": message}]
         definitions = self.tools.definitions()

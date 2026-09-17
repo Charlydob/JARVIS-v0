@@ -4,7 +4,7 @@ import secrets
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -85,7 +85,12 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
 
 
 @app.post("/api/audio", response_model=AudioResponse, tags=["conversation"])
-async def audio(request: Request, file: UploadFile = File(...)) -> AudioResponse:
+async def audio(
+    request: Request,
+    file: UploadFile = File(...),
+    duration_ms: int | None = Form(default=None),
+    speech_ms: int | None = Form(default=None),
+) -> AudioResponse:
     raw = await file.read(settings.max_audio_bytes + 1)
     if len(raw) > settings.max_audio_bytes:
         raise HTTPException(status_code=413, detail="Audio file is too large")
@@ -94,7 +99,12 @@ async def audio(request: Request, file: UploadFile = File(...)) -> AudioResponse
     try:
         result = await relay(request).request(
             "audio",
-            {"data": base64.b64encode(raw).decode("ascii"), "content_type": file.content_type or "audio/webm"},
+            {
+                "data": base64.b64encode(raw).decode("ascii"),
+                "content_type": file.content_type or "audio/webm",
+                "duration_ms": duration_ms,
+                "speech_ms": speech_ms,
+            },
         )
         return AudioResponse.model_validate(result)
     except (CoreOfflineError, CoreRequestError) as exc:
@@ -125,6 +135,19 @@ async def history(request: Request, limit: int = Query(100, ge=1, le=500)) -> li
     try:
         result = await relay(request).request("history", {"limit": limit})
         return list(result.get("items", []))
+    except (CoreOfflineError, CoreRequestError) as exc:
+        raise unavailable(exc) from exc
+
+
+@app.get("/api/stats", tags=["conversation"])
+async def stats(request: Request) -> dict[str, int]:
+    try:
+        result = await relay(request).request("stats", {})
+        return {
+            "messages": int(result.get("messages", 0)),
+            "positives": int(result.get("positives", 0)),
+            "negatives": int(result.get("negatives", 0)),
+        }
     except (CoreOfflineError, CoreRequestError) as exc:
         raise unavailable(exc) from exc
 

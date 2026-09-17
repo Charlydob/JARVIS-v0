@@ -19,6 +19,12 @@ button { color: inherit; }
 .menu-attribution { display: block; padding: 9px 12px 5px; color: #555; font-size: 10px; text-decoration: none; }
 .menu-attribution:hover { color: #888; }
 
+.quick-feedback { position: fixed; z-index: 5; top: max(22px, env(safe-area-inset-top)); left: 24px; display: flex; gap: 8px; }
+.quick-feedback button { width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid #202020; border-radius: 50%; background: #080808; color: #777; cursor: pointer; transition: color .2s ease, background .2s ease, border-color .2s ease, transform .2s ease; }
+.quick-feedback button:hover:not(:disabled), .quick-feedback button:focus-visible { color: #fff; border-color: #555; outline: none; transform: translateY(-1px); }
+.quick-feedback button.selected { color: #000; background: #fff; border-color: #fff; }
+.quick-feedback button:disabled { opacity: .4; cursor: default; }
+
 .presence { width: min(680px, 96vw); display: grid; justify-items: center; }
 .face { position: relative; width: min(500px, 88vw); aspect-ratio: 1.85; color: #fff; cursor: pointer; animation: face-drift 9s cubic-bezier(.45, 0, .55, 1) infinite; will-change: transform; }
 .face:focus-visible { outline: 1px solid #444; outline-offset: 18px; border-radius: 45%; }
@@ -36,8 +42,8 @@ button { color: inherit; }
 .face--listening .eye { animation: attentive 2.6s cubic-bezier(.45, 0, .55, 1) infinite; }
 .face--thinking .eyes { animation: think-shift 2s cubic-bezier(.65, 0, .35, 1) infinite; }
 .face--thinking .eye { animation: think-eyes 1.9s cubic-bezier(.65, 0, .35, 1) infinite; }
-.face--speaking .smile { opacity: 0; }
-.face--speaking .talking-mouth { opacity: 1; animation: mouth-open .48s cubic-bezier(.45, 0, .55, 1) infinite alternate; }
+.face--playing .smile { opacity: 0; }
+.face--playing .talking-mouth { opacity: 1; animation: mouth-open .48s cubic-bezier(.45, 0, .55, 1) infinite alternate; }
 .face--speaking .eye { animation: eye-life 4.5s cubic-bezier(.45, 0, .55, 1) infinite; }
 .face--sleeping { color: #333; }
 .face--sleeping .eye { height: 12px; border-radius: 999px; animation: none; }
@@ -58,6 +64,11 @@ button { color: inherit; }
 .dashboard h1 { margin: 0; font-size: 25px; font-weight: 550; }
 .dashboard-header p { margin: 6px 0 0; color: #666; font-size: 12px; }
 .plain-button { border: 0; background: none; display: flex; align-items: center; gap: 8px; color: #aaa; cursor: pointer; }
+.history-stats { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px 26px; margin: -18px 0 28px; color: #777; font-size: 12px; }
+.history-stats span { display: flex; align-items: baseline; gap: 6px; }
+.history-stats strong { color: #ddd; font-size: 16px; font-weight: 600; }
+.history-stats .stat-positive, .history-stats .stat-positive strong { color: #54c878; }
+.history-stats .stat-negative, .history-stats .stat-negative strong { color: #df6666; }
 .history { display: grid; gap: 18px; }
 .history-day { border-bottom: 1px solid #171717; padding-bottom: 18px; }
 .history-day summary { display: flex; align-items: center; justify-content: space-between; padding: 12px 4px; color: #ddd; cursor: pointer; text-transform: capitalize; }
@@ -95,8 +106,11 @@ button { color: inherit; }
 @keyframes think-eyes { 0%, 100% { transform: scale(.96, 1.04); } 50% { transform: scale(1.04, .94); } }
 @keyframes mouth-breathe { 0%, 100% { transform: scale(1, .96); } 50% { transform: scale(.98, 1.06); } }
 @keyframes mouth-open { from { transform: scale(.72, .32); } to { transform: scale(1, 1.08); } }
+@keyframes attentive-desktop { 0%, 100% { transform: translate3d(-5px, 1px, 0) scale(1.01, .98); } 50% { transform: translate3d(5px, -2px, 0) scale(1.065, 1.04); } }
+@keyframes eye-life-desktop { 0%, 42%, 49%, 100% { transform: translate3d(-4px, 0, 0) scale(1); } 15% { transform: translate3d(4px, -2px, 0) scale(1.025, .97); } 45% { transform: scaleY(1); } 46.5% { transform: scaleY(.07); } 48% { transform: scaleY(1); } 72% { transform: translate3d(3px, 2px, 0) scale(.975, 1.025); } }
 
 @media (max-width: 640px) {
+  .quick-feedback { top: max(14px, env(safe-area-inset-top)); left: 14px; }
   .menu-button { top: max(14px, env(safe-area-inset-top)); right: 14px; }
   .menu { top: 65px; right: 14px; }
   .dashboard { padding-top: 20px; }
@@ -104,6 +118,11 @@ button { color: inherit; }
   .dashboard-header h1 { font-size: 20px; }
   .history-item { max-width: 91%; }
   .notice { max-width: 90vw; }
+}
+
+@media (min-width: 641px) and (prefers-reduced-motion: no-preference) {
+  .face--listening .eye { animation-name: attentive-desktop; }
+  .face--speaking .eye { animation-name: eye-life-desktop; }
 }
 
 @media (prefers-reduced-motion: reduce) {

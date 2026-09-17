@@ -84,6 +84,21 @@ class Storage:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def stats(self) -> dict[str, int]:
+        row = self.connection.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM messages) AS messages,
+                (SELECT COUNT(*) FROM feedback WHERE rating = 'good') AS positives,
+                (SELECT COUNT(*) FROM feedback WHERE rating = 'bad') AS negatives
+            """
+        ).fetchone()
+        return {
+            "messages": int(row["messages"]),
+            "positives": int(row["positives"]),
+            "negatives": int(row["negatives"]),
+        }
+
     def memories(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             "SELECT id, content, metadata, created_at FROM memories ORDER BY created_at DESC LIMIT ?", (limit,)

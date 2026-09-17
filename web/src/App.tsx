@@ -2,7 +2,9 @@ import { FormEvent, useCallback, useEffect, useMemo, useReducer, useRef, useStat
 import { ArrowLeft, Check, Cookie, History, Menu, Send, Volume2, VolumeX, X } from 'lucide-react'
 import {
   getHistory,
+  getStats,
   getStatus,
+  ConversationStats,
   HistoryItem,
   sendFeedback,
   streamMessage,
@@ -78,16 +80,16 @@ async function unlockSpeech(): Promise<boolean> {
   }
 }
 
-function playAudio(blob: Blob): Promise<void> {
+function playAudio(blob: Blob, onPlayback: (playing: boolean) => void): Promise<void> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(blob)
     resetIOSAudioRoute()
     speechAudio.pause()
     speechAudio.src = url
     speechAudio.volume = 1
-    speechAudio.onended = () => { URL.revokeObjectURL(url); resolve() }
-    speechAudio.onerror = () => { speechUnlocked = false; URL.revokeObjectURL(url); reject(new Error('No se pudo reproducir la voz')) }
-    speechAudio.play().catch((error) => { speechUnlocked = false; URL.revokeObjectURL(url); reject(error) })
+    speechAudio.onended = () => { onPlayback(false); URL.revokeObjectURL(url); resolve() }
+    speechAudio.onerror = () => { onPlayback(false); speechUnlocked = false; URL.revokeObjectURL(url); reject(new Error('No se pudo reproducir la voz')) }
+    speechAudio.play().then(() => onPlayback(true)).catch((error) => { onPlayback(false); speechUnlocked = false; URL.revokeObjectURL(url); reject(error) })
   })
 }
 
@@ -98,12 +100,15 @@ export default function App() {
   const [muted, setMuted] = useState(() => localStorage.getItem('jarvis-muted') === 'true')
   const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem('jarvis-sound') !== 'false')
   const [voiceReady, setVoiceReady] = useState(false)
+  const [audioPlaying, setAudioPlaying] = useState(false)
   const [location, setLocation] = useState<UserLocation>()
   const [coreOnline, setCoreOnline] = useState(false)
   const [notice, setNotice] = useState('Conectando con el Core…')
   const [input, setInput] = useState('')
   const [history, setHistory] = useState<HistoryItem[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
+  const [stats, setStats] = useState<ConversationStats>({ messages: 0, positives: 0, negatives: 0 })
+  const [latestResponse, setLatestResponse] = useState<{ id: string; rating: 'good' | 'bad' | null } | null>(null)
   const [badMessage, setBadMessage] = useState<string | null>(null)
   const [correction, setCorrection] = useState('')
   const [feedbackReason, setFeedbackReason] = useState('incorrect')
@@ -135,9 +140,19 @@ export default function App() {
   const refreshHistory = useCallback(async () => {
     if (!coreOnline) return
     setHistoryLoading(true)
-    try { setHistory(await getHistory()) } catch { /* status already explains an unavailable core */ }
+    try {
+      const [items, persistedStats] = await Promise.all([getHistory(), getStats()])
+      setHistory(items)
+      setStats(persistedStats)
+      const newestAssistant = items.find((item) => item.role === 'assistant')
+      if (newestAssistant) setLatestResponse({ id: newestAssistant.id, rating: newestAssistant.rating })
+    } catch { /* status already explains an unavailable core */ }
     finally { setHistoryLoading(false) }
   }, [coreOnline])
+
+  useEffect(() => {
+    if (coreOnline) void refreshHistory()
+  }, [coreOnline, refreshHistory])
 
   useEffect(() => {
     let cancelled = false
@@ -206,8 +221,8 @@ export default function App() {
         speechBuffer = split.remainder
         for (const segment of split.segments) {
           speechQueue = speechQueue.then(async () => {
-            const speech = await synthesizeSpeech(segment, language)
-            await playAudio(speech)
+            const speech = await synthesizeSpeech(segment)
+            await playAudio(speech, setAudioPlaying)
           }).catch(() => { speechFailed = true })
         }
       }
@@ -225,6 +240,7 @@ export default function App() {
         }
       })
       conversationId.current = response.conversation_id
+      setLatestResponse({ id: response.message_id, rating: null })
       fullText = response.message || fullText
       setNotice(fullText)
       if (!responseStarted) dispatch({ type: 'RESPONSE' })
@@ -241,6 +257,7 @@ export default function App() {
       }
       dispatch({ type: 'SPEECH_END' })
     } catch (error) {
+      setAudioPlaying(false)
       setNotice(error instanceof Error ? error.message : 'No he podido completar la solicitud')
       dispatch({ type: 'FAIL' })
     }
@@ -266,11 +283,11 @@ export default function App() {
     setNotice(next ? 'Voz activada. Estoy escuchando.' : 'Voz silenciada. Seguiré respondiendo por texto.')
   }
 
-  const processAudio = useCallback(async (audio: Blob) => {
+  const processAudio = useCallback(async (audio: Blob, metadata: { durationMs: number; speechMs: number }) => {
     dispatch({ type: 'SUBMIT' })
     setNotice('Transcribiendo…')
     try {
-      const transcription = await transcribeAudio(audio)
+      const transcription = await transcribeAudio(audio, metadata)
       if (!transcription.transcript) {
         setNotice('Estoy escuchando')
         dispatch({ type: 'EMPTY_AUDIO' })
@@ -288,7 +305,7 @@ export default function App() {
     enabled: coreOnline && !muted && view === 'face' && state !== 'error',
     paused: busy,
     onListening: useCallback(() => dispatch({ type: 'START_LISTENING' }), []),
-    onUtterance: useCallback((audio) => processAudio(audio), [processAudio]),
+    onUtterance: useCallback((audio, metadata) => processAudio(audio, metadata), [processAudio]),
     onError: useCallback((message) => { setNotice(message); dispatch({ type: 'FAIL' }) }, [])
   })
 
@@ -322,6 +339,7 @@ export default function App() {
       return
     }
     await sendFeedback(messageId, rating, undefined, 'perfect')
+    setLatestResponse((current) => current?.id === messageId ? { ...current, rating } : current)
     await refreshHistory()
   }
 
@@ -329,18 +347,45 @@ export default function App() {
     event.preventDefault()
     if (!badMessage || !correction.trim()) return
     await sendFeedback(badMessage, 'bad', correction.trim(), feedbackReason)
+    setLatestResponse((current) => current?.id === badMessage ? { ...current, rating: 'bad' } : current)
     setBadMessage(null)
     setCorrection('')
     await refreshHistory()
   }
 
+  const correctionDialog = badMessage && (
+    <div className="dialog-backdrop" onMouseDown={() => setBadMessage(null)}>
+      <form className="correction-dialog" onSubmit={submitCorrection} onMouseDown={(event) => event.stopPropagation()}>
+        <button type="button" className="dialog-close" onClick={() => setBadMessage(null)}><X size={18} /></button>
+        <h2>¿Qué debería haber respondido?</h2>
+        <p>La corrección se guardará en el PC para futuros datos de entrenamiento.</p>
+        <select value={feedbackReason} onChange={(event) => setFeedbackReason(event.target.value)} aria-label="Motivo del feedback">
+          <option value="incorrect">Incorrecta</option>
+          <option value="too_long">Demasiado larga</option>
+          <option value="not_useful">Poco útil</option>
+          <option value="tone">Tono inadecuado</option>
+          <option value="other">Otro motivo</option>
+        </select>
+        <textarea autoFocus value={correction} onChange={(event) => setCorrection(event.target.value)} rows={5} />
+        <button className="save-button" disabled={!correction.trim()}>Guardar corrección</button>
+      </form>
+    </div>
+  )
+
   if (view === 'dashboard') {
     return (
+      <>
       <main className="dashboard">
         <header className="dashboard-header">
           <button className="plain-button" onClick={() => setView('face')}><ArrowLeft size={18} /> Volver</button>
           <div><h1>Conversaciones</h1><p>{coreOnline ? 'Core conectado' : 'Core desconectado'}</p></div>
         </header>
+
+        <section className="history-stats" aria-label="Estadísticas persistentes">
+          <span><strong>{stats.messages}</strong> Mensajes</span>
+          <span className="stat-positive"><strong>{stats.positives}</strong> Positivos</span>
+          <span className="stat-negative"><strong>{stats.negatives}</strong> Negativos</span>
+        </section>
 
         <section className="history" aria-live="polite">
           {historyLoading && <p className="empty">Cargando…</p>}
@@ -372,30 +417,19 @@ export default function App() {
           <button disabled={!input.trim() || !coreOnline || busy} aria-label="Enviar"><Send size={18} /></button>
         </form>
 
-        {badMessage && (
-          <div className="dialog-backdrop" onMouseDown={() => setBadMessage(null)}>
-            <form className="correction-dialog" onSubmit={submitCorrection} onMouseDown={(event) => event.stopPropagation()}>
-              <button type="button" className="dialog-close" onClick={() => setBadMessage(null)}><X size={18} /></button>
-              <h2>¿Qué debería haber respondido?</h2>
-              <p>La corrección se guardará en el PC para futuros datos de entrenamiento.</p>
-              <select value={feedbackReason} onChange={(event) => setFeedbackReason(event.target.value)} aria-label="Motivo del feedback">
-                <option value="incorrect">Incorrecta</option>
-                <option value="too_long">Demasiado larga</option>
-                <option value="not_useful">Poco útil</option>
-                <option value="tone">Tono inadecuado</option>
-                <option value="other">Otro motivo</option>
-              </select>
-              <textarea autoFocus value={correction} onChange={(event) => setCorrection(event.target.value)} rows={5} />
-              <button className="save-button" disabled={!correction.trim()}>Guardar corrección</button>
-            </form>
-          </div>
-        )}
       </main>
+      {correctionDialog}
+      </>
     )
   }
 
   return (
+    <>
     <main className="app">
+      <div className="quick-feedback" aria-label="Valorar la última respuesta de JARVIS">
+        <button disabled={!latestResponse} className={latestResponse?.rating === 'good' ? 'selected' : ''} onClick={() => latestResponse && void rate(latestResponse.id, 'good')} aria-label="Marcar última respuesta como buena" aria-pressed={latestResponse?.rating === 'good'}><Cookie size={18} /></button>
+        <button disabled={!latestResponse} className={latestResponse?.rating === 'bad' ? 'selected' : ''} onClick={() => latestResponse && void rate(latestResponse.id, 'bad')} aria-label="Marcar última respuesta como mala" aria-pressed={latestResponse?.rating === 'bad'}><WhipIcon size={18} /></button>
+      </div>
       <button className="menu-button" onClick={() => setMenuOpen(!menuOpen)} aria-label="Abrir menú"><Menu size={24} /></button>
       {menuOpen && (
         <nav className="menu">
@@ -408,10 +442,12 @@ export default function App() {
       )}
 
       <section className="presence">
-        <JarvisFace state={state} voiceEnabled={soundEnabled && voiceReady} onClick={toggleMute} onToggleVoice={toggleSound} />
+        <JarvisFace state={state} playing={audioPlaying} voiceEnabled={soundEnabled && voiceReady} onClick={toggleMute} onToggleVoice={toggleSound} />
         <p className="state-label">{stateLabels[state]}</p>
         <p className="notice" ref={noticeRef}>{notice}</p>
       </section>
     </main>
+    {correctionDialog}
+    </>
   )
 }

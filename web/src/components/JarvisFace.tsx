@@ -1,8 +1,8 @@
 import type { JarvisState } from '../state/machine'
 
-export function JarvisFace({ state, voiceEnabled, onClick, onToggleVoice }: { state: JarvisState; voiceEnabled: boolean; onClick: () => void; onToggleVoice: () => void }) {
+export function JarvisFace({ state, playing, voiceEnabled, onClick, onToggleVoice }: { state: JarvisState; playing: boolean; voiceEnabled: boolean; onClick: () => void; onToggleVoice: () => void }) {
   return (
-    <div className={`face face--${state} ${voiceEnabled ? '' : 'face--voice-muted'}`} onClick={onClick} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onClick() }} aria-label={state === 'muted' ? 'Activar escucha' : 'Silenciar micrófono'}>
+    <div className={`face face--${state} ${playing ? 'face--playing' : ''} ${voiceEnabled ? '' : 'face--voice-muted'}`} onClick={onClick} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onClick() }} aria-label={state === 'muted' ? 'Activar escucha' : 'Silenciar micrófono'}>
       <span className="eyes" aria-hidden="true">
         <i className="eye" />
         <i className="eye" />

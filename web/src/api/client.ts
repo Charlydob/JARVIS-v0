@@ -25,6 +25,17 @@ export interface HistoryItem {
   correction: string | null
 }
 
+export interface ConversationStats {
+  messages: number
+  positives: number
+  negatives: number
+}
+
+export interface AudioCaptureMetadata {
+  durationMs: number
+  speechMs: number
+}
+
 const apiUrl = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 
 async function timedFetch(input: string, init: RequestInit = {}, timeoutMs = 90_000): Promise<Response> {
@@ -106,12 +117,16 @@ export async function streamMessage(
   return result
 }
 
-export async function transcribeAudio(audio: Blob): Promise<{ transcript: string; language?: string }> {
+export async function transcribeAudio(audio: Blob, metadata?: AudioCaptureMetadata): Promise<{ transcript: string; language?: string }> {
   const form = new FormData()
   const extension = audio.type.includes('mp4') || audio.type.includes('m4a') || audio.type.includes('aac')
     ? 'm4a'
     : audio.type.includes('ogg') ? 'ogg' : 'webm'
   form.append('file', audio, `utterance.${extension}`)
+  if (metadata) {
+    form.append('duration_ms', String(Math.round(metadata.durationMs)))
+    form.append('speech_ms', String(Math.round(metadata.speechMs)))
+  }
   const response = await checked(await timedFetch(`${apiUrl}/api/audio`, { method: 'POST', body: form }))
   const body = await response.json() as { transcript: string; language?: string }
   return { transcript: body.transcript.trim(), language: body.language }
@@ -128,6 +143,10 @@ export async function synthesizeSpeech(text: string, language?: string): Promise
 
 export async function getHistory(): Promise<HistoryItem[]> {
   return (await checked(await fetch(`${apiUrl}/api/history?limit=200`, { cache: 'no-store' }))).json() as Promise<HistoryItem[]>
+}
+
+export async function getStats(): Promise<ConversationStats> {
+  return (await checked(await fetch(`${apiUrl}/api/stats`, { cache: 'no-store' }))).json() as Promise<ConversationStats>
 }
 
 export async function sendFeedback(messageId: string, rating: 'good' | 'bad', correction?: string, reason?: string): Promise<void> {

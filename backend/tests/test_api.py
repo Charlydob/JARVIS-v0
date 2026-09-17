@@ -106,3 +106,54 @@ def test_bad_feedback_requires_correction() -> None:
     with TestClient(app) as client:
         response = client.post("/api/feedback", json={"message_id": "message", "rating": "bad"})
     assert response.status_code == 422
+
+
+def test_stats_round_trip_through_connected_core() -> None:
+    headers = {"Authorization": f"Bearer {settings.core_token}"}
+    with TestClient(app) as client, client.websocket_connect("/internal/core/ws", headers=headers) as core:
+        assert core.receive_json() == {"type": "hello_ack"}
+        core.send_json({"type": "hello", "metadata": {}})
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            response_future = executor.submit(client.get, "/api/stats")
+            request = core.receive_json()
+            assert request["action"] == "stats"
+            core.send_json({
+                "type": "result",
+                "id": request["id"],
+                "ok": True,
+                "result": {"messages": 42, "positives": 7, "negatives": 2},
+            })
+            response = response_future.result(timeout=2)
+
+        assert response.status_code == 200
+        assert response.json() == {"messages": 42, "positives": 7, "negatives": 2}
+
+
+def test_audio_forwards_capture_diagnostics() -> None:
+    headers = {"Authorization": f"Bearer {settings.core_token}"}
+    with TestClient(app) as client, client.websocket_connect("/internal/core/ws", headers=headers) as core:
+        assert core.receive_json() == {"type": "hello_ack"}
+        core.send_json({"type": "hello", "metadata": {}})
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            response_future = executor.submit(
+                client.post,
+                "/api/audio",
+                files={"file": ("utterance.webm", b"audio", "audio/webm")},
+                data={"duration_ms": "6230", "speech_ms": "2810"},
+            )
+            request = core.receive_json()
+            assert request["action"] == "audio"
+            assert request["payload"]["duration_ms"] == 6230
+            assert request["payload"]["speech_ms"] == 2810
+            core.send_json({
+                "type": "result",
+                "id": request["id"],
+                "ok": True,
+                "result": {"transcript": "Hola", "language": "es", "provider": "faster-whisper"},
+            })
+            response = response_future.result(timeout=2)
+
+        assert response.status_code == 200
+        assert response.json()["transcript"] == "Hola"

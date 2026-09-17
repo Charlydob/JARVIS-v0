@@ -16,3 +16,7 @@ def test_history_and_feedback_are_persistent(tmp_path: Path) -> None:
     assert history[0]["reason"] == "incorrect"
     assert history[0]["correction"] == "Deberías haber dicho hola, señor"
     assert feedback_id
+    assert storage.stats() == {"messages": 2, "positives": 0, "negatives": 1}
+
+    storage.add_feedback(assistant_id, "good", None, "perfect")
+    assert storage.stats() == {"messages": 2, "positives": 1, "negatives": 0}
