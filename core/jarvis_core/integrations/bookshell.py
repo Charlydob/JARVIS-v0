@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from jarvis_core.tools import Tool, ToolRegistry
+from jarvis_core.integrations.bookshell_domains import BookShellDomains, register_domain_tools
 
 
 class BookShellClient:
@@ -34,9 +35,29 @@ class BookShellClient:
             response.raise_for_status()
             return dict(response.json())
 
+    async def data(self, path: str) -> Any:
+        return (await self._request("GET", f"/data/{path.strip('/')}" )).get("data")
+
+    async def put_data(self, path: str, value: Any) -> dict[str, Any]:
+        return await self._request("PUT", f"/data/{path.strip('/')}", json=value)
+
+    async def patch_data(self, path: str, value: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("PATCH", f"/data/{path.strip('/')}", json=value)
+
+    async def delete_data(self, path: str) -> dict[str, Any]:
+        return await self._request("DELETE", f"/data/{path.strip('/')}")
+
+    async def push_data(self, path: str, value: Any) -> dict[str, Any]:
+        return await self._request("POST", f"/data/push/{path.strip('/')}", json=value)
+
+    async def transaction(self, path: str, current: Any, next_value: Any) -> dict[str, Any]:
+        return await self._request(
+            "POST", f"/data/transaction/{path.strip('/')}",
+            json={"currentValue": current, "nextValue": next_value},
+        )
+
     async def books(self) -> dict[str, dict[str, Any]]:
-        payload = await self._request("GET", "/data/books/books")
-        data = payload.get("data") or {}
+        data = await self.data("books/books") or {}
         return data if isinstance(data, dict) else {}
 
     async def current_book(self, title: str | None = None) -> dict[str, Any]:
@@ -62,13 +83,48 @@ class BookShellClient:
         else:
             reading = [book for book in books if str(book.get("status", "")).lower() == "reading"]
             chosen = (reading or books)[0]
-        return {"found": True, "book": self._summary(chosen)}
+        return {"found": True, "book": await self._book_summary(chosen)}
+
+    async def query_books(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        mode = str(arguments.get("mode") or "current")
+        title = str(arguments.get("title") or "").strip() or None
+        if mode in {"current", "progress"}:
+            return await self.current_book(title)
+        books = self._ordered_books(await self.books())
+        if mode == "search":
+            query = (title or "").casefold()
+            matches = [await self._book_summary(book) for book in books if query in str(book.get("title", "")).casefold()]
+            return {"items": matches[: int(arguments.get("limit") or 10)], "count": len(matches)}
+        selection = await self.current_book(title)
+        if not selection.get("found"):
+            return selection
+        book = selection["book"]
+        identifier = str(book["id"])
+        if mode == "history":
+            log = await self.data("books/readingLog") or {}
+            entries = [
+                {"date": date, "pagesRead": int(values.get(identifier) or 0)}
+                for date, values in log.items() if isinstance(values, dict) and values.get(identifier) is not None
+            ]
+            entries.sort(key=lambda item: item["date"], reverse=True)
+            return {"book": book, "history": entries[: int(arguments.get("limit") or 30)]}
+        if mode == "notes":
+            links = await self.data("books/links") or {}
+            items = [
+                {"id": key, **value} for key, value in links.items()
+                if isinstance(value, dict) and (
+                    value.get("bookId") == identifier or value.get("bookKey") == identifier
+                    or str(value.get("bookTitle", "")).casefold() == str(book.get("title", "")).casefold()
+                )
+            ]
+            return {"book": book, "notes": items[: int(arguments.get("limit") or 20)]}
+        return {"error": "unsupported_mode"}
 
     async def update_progress(self, page: int, title: str | None = None, book_id: str | None = None) -> dict[str, Any]:
         all_books = await self.books()
         if book_id:
             selected = all_books.get(book_id)
-            selection = {"found": bool(selected), "book": self._summary({"id": book_id, **selected}) if selected else None}
+            selection = {"found": bool(selected), "book": await self._book_summary({"id": book_id, **selected}) if selected else None}
         else:
             selection = await self.current_book(title)
         if not selection.get("found"):
@@ -85,10 +141,7 @@ class BookShellClient:
             "status": "finished" if total_pages and target >= total_pages else "reading",
             "updatedAt": int(time.time() * 1000),
         }
-        await self._request(
-            "POST", f"/data/transaction/books/books/{identifier}",
-            json={"currentValue": current, "nextValue": updated},
-        )
+        await self.transaction(f"books/books/{identifier}", current, updated)
         log_updated = True
         delta = target - old_page
         if delta:
@@ -97,29 +150,33 @@ class BookShellClient:
             try:
                 log_payload = await self._request("GET", path)
                 current_log = int(log_payload.get("data") or 0)
-                await self._request(
-                    "POST", f"/data/transaction/books/readingLog/{day}/{identifier}",
-                    json={"currentValue": log_payload.get("data"), "nextValue": current_log + delta},
-                )
+                await self.transaction(f"books/readingLog/{day}/{identifier}", log_payload.get("data"), current_log + delta)
             except httpx.HTTPError:
                 log_updated = False
         return {
             "updated": True,
-            "book": self._summary({"id": identifier, **updated}),
+            "book": await self._book_summary({"id": identifier, **updated}),
             "previousPage": old_page,
             "readingLogUpdated": log_updated,
         }
 
     async def create_reminder(self, arguments: dict[str, Any]) -> dict[str, Any]:
         minutes = max(0, int(arguments.get("minutes_before") or 0))
+        relative_day = str(arguments.get("relative_day") or "")
+        target_date = str(arguments.get("target_date") or "")
+        if relative_day in {"today", "tomorrow"}:
+            offset = timedelta(days=1) if relative_day == "tomorrow" else timedelta()
+            target_date = (datetime.now(ZoneInfo(self.timezone)).date() + offset).isoformat()
+        if not target_date:
+            return {"created": False, "clarificationRequired": True, "message": "¿Para qué fecha creo el recordatorio?"}
         body = {
             "title": str(arguments["title"]).strip(),
             "description": str(arguments.get("description") or "").strip(),
             "emoji": "⏰",
             "type": "normal",
-            "targetDate": str(arguments["target_date"]),
+            "targetDate": target_date,
             "targetTime": str(arguments.get("target_time") or "") or None,
-            "timezone": str(arguments.get("timezone") or self.timezone),
+            "timezone": self.timezone,
             "source": {"type": "manual", "metadata": {"createdBy": "jarvis"}},
             "alerts": [{"mode": "relative", "minutesBefore": minutes, "channel": "telegram"}],
             "status": "pending",
@@ -134,15 +191,30 @@ class BookShellClient:
 
     @staticmethod
     def _summary(book: dict[str, Any]) -> dict[str, Any]:
+        pages = int(book.get("pages") or 0)
+        current = int(book.get("currentPage") or 0)
         return {
             "id": book.get("id"),
             "title": book.get("title"),
             "author": book.get("author"),
-            "currentPage": int(book.get("currentPage") or 0),
-            "pages": int(book.get("pages") or 0),
+            "currentPage": current,
+            "pages": pages,
+            "remainingPages": max(0, pages - current),
+            "progressPercent": round((current / pages) * 100, 1) if pages else None,
             "status": book.get("status"),
             "updatedAt": book.get("updatedAt"),
         }
+
+    async def _book_summary(self, book: dict[str, Any]) -> dict[str, Any]:
+        summary = self._summary(book)
+        log = await self.data("books/readingLog") or {}
+        dates = [date for date, values in log.items() if isinstance(values, dict) and values.get(book.get("id"))]
+        summary["lastReadingDate"] = max(dates) if dates else None
+        summary["daysSinceReading"] = (
+            (datetime.now(ZoneInfo(self.timezone)).date() - datetime.fromisoformat(summary["lastReadingDate"]).date()).days
+            if summary["lastReadingDate"] else None
+        )
+        return summary
 
 
 def register_tools(registry: ToolRegistry) -> None:
@@ -152,11 +224,17 @@ def register_tools(registry: ToolRegistry) -> None:
         timezone=os.getenv("JARVIS_BOOKSHELL_TIMEZONE", "Europe/Zurich"),
     )
 
+    domains = BookShellDomains(client)
+
     registry.register(Tool(
-        "bookshell_get_current_book",
-        "Consulta BookShell cuando el usuario pregunta qué libro estaba leyendo, cuál fue el último libro o por qué página iba. Se puede indicar un título aproximado.",
-        {"type": "object", "properties": {"title": {"type": "string", "description": "Título opcional, puede ser aproximado"}}},
-        lambda args: client.current_book(args.get("title")),
+        "bookshell_books_query",
+        "Consulta libros en BookShell: libro actual, búsqueda por título, página/progreso/estado, historial de lectura o citas/notas. Úsala también para cuánto queda o cuándo se leyó por última vez.",
+        {"type": "object", "properties": {
+            "mode": {"type": "string", "enum": ["current", "progress", "search", "history", "notes"]},
+            "title": {"type": "string", "description": "Título opcional aproximado"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        }, "required": ["mode"]},
+        client.query_books,
     ))
     registry.register(Tool(
         "bookshell_update_progress",
@@ -180,11 +258,12 @@ def register_tools(registry: ToolRegistry) -> None:
                 "title": {"type": "string"},
                 "description": {"type": "string"},
                 "target_date": {"type": "string", "description": "Fecha YYYY-MM-DD"},
+                "relative_day": {"type": "string", "enum": ["today", "tomorrow"], "description": "Usar si el usuario dice hoy o mañana"},
                 "target_time": {"type": "string", "description": "Hora HH:MM"},
-                "timezone": {"type": "string", "default": "Europe/Zurich"},
                 "minutes_before": {"type": "integer", "minimum": 0, "description": "Aviso previo en minutos; 0 si no se pidió antelación"},
             },
-            "required": ["title", "target_date"],
+            "required": ["title"],
         },
         client.create_reminder,
     ))
+    register_domain_tools(registry, domains)

@@ -30,3 +30,18 @@ def test_registry_rejects_duplicate_names() -> None:
     registry.register(tool)
     with pytest.raises(ValueError, match="already registered"):
         registry.register(tool)
+
+
+def test_registry_narrows_bookshell_domains_without_choosing_action() -> None:
+    async def handler(_arguments):
+        return None
+
+    registry = ToolRegistry()
+    for name in ("bookshell_gym_query", "bookshell_gym_write", "bookshell_world_query", "bookshell_reminders_query"):
+        registry.register(Tool(name, name, {"type": "object"}, handler))
+
+    gym_names = [item["function"]["name"] for item in registry.definitions_for("¿Cuánto llevo sin gimnasio?")]
+    reminder_names = [item["function"]["name"] for item in registry.definitions_for("¿Cuándo tiene Laura guardia?")]
+
+    assert gym_names == ["bookshell_gym_query", "bookshell_gym_write"]
+    assert reminder_names == ["bookshell_reminders_query"]

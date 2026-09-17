@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
@@ -27,6 +28,7 @@ Dirígete a él como «señor» (o el equivalente natural en ese idioma) cuando 
 No inventes nunca hechos, ubicación, clima, agenda, vivienda, familia, posesiones ni acciones realizadas.
 No menciones mansiones, desayunos ni detalles personales que el usuario no haya proporcionado.
 Un saludo se responde con brevedad, sin añadir noticias, clima ni supuestos.
+No antepongas etiquetas de rol como «assistant», «user» o «JARVIS» a la respuesta.
 Si necesitas información actual y no aparece en un contexto de herramienta, di claramente que no dispones de ella."""
 
 WEATHER_WORDS = ("tiempo", "clima", "lluv", "temperatura", "frío", "frio", "calor", "nubl", "pronóstico", "pronostico", "previsión", "prevision")
@@ -309,14 +311,19 @@ class JarvisServices:
             f"Answer the user's latest message entirely in {language_name}. "
             "Do not answer in Spanish unless the required output language is Spanish or the user explicitly asks for Spanish."
         )
-        context_parts = [language_context]
+        date_context = (
+            f"CURRENT LOCAL DATE: {datetime.now().astimezone().date().isoformat()}. "
+            "For tool calls, prefer relative_day/period/scope when the user says today, tomorrow, this week or this month. "
+            "Never invent a date, ID, duration or field the user did not provide."
+        )
+        context_parts = [language_context, date_context]
         if feedback_context:
             context_parts.append(feedback_context)
         if context:
             context_parts.append(context)
         context = "\n".join(context_parts)
         conversation: list[dict[str, Any]] = [*previous, {"role": "user", "content": message}]
-        definitions = self.tools.definitions()
+        definitions = self.tools.definitions_for(message)
         if definitions:
             decision = await self.ollama.tool_decision(conversation, context, definitions)
             tool_calls = list(decision.get("tool_calls") or [])
