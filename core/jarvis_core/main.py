@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import signal
+import socket
 from contextlib import suppress
 from typing import Any
 
@@ -11,6 +12,16 @@ from jarvis_core.config import CoreSettings
 from jarvis_core.services import JarvisServices
 
 LOGGER = logging.getLogger("jarvis-core")
+INSTANCE_LOCK_PORT = 47651
+
+
+def acquire_instance_lock() -> socket.socket:
+    instance_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        instance_lock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    instance_lock.bind(("127.0.0.1", INSTANCE_LOCK_PORT))
+    instance_lock.listen(1)
+    return instance_lock
 
 
 async def send_json(socket: ClientConnection, lock: asyncio.Lock, payload: dict[str, Any]) -> None:
@@ -91,6 +102,12 @@ async def run() -> None:
 
 
 def main() -> None:
+    try:
+        instance_lock = acquire_instance_lock()
+    except OSError:
+        logging.basicConfig(level=logging.INFO)
+        LOGGER.warning("Another JARVIS Core instance is already running; exiting")
+        return
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     task = loop.create_task(run())
@@ -104,6 +121,7 @@ def main() -> None:
         pass
     finally:
         loop.close()
+        instance_lock.close()
 
 
 if __name__ == "__main__":

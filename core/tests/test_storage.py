@@ -11,6 +11,6 @@ def test_history_and_feedback_are_persistent(tmp_path: Path) -> None:
 
     history = storage.history()
     assert len(history) == 2
-    assert history[-1]["rating"] == "bad"
-    assert history[-1]["correction"] == "Deberías haber dicho hola, señor"
+    assert history[0]["rating"] == "bad"
+    assert history[0]["correction"] == "Deberías haber dicho hola, señor"
     assert feedback_id

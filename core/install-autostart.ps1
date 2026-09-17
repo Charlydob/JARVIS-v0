@@ -1,8 +1,10 @@
 $ErrorActionPreference = "Stop"
 $coreRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$runScript = Join-Path $coreRoot "run.ps1"
-$powershell = (Get-Command powershell.exe).Source
-$action = New-ScheduledTaskAction -Execute $powershell -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$runScript`""
+$python = Join-Path $coreRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $python)) {
+    throw "Run core/run.ps1 once to create the virtual environment before installing autostart."
+}
+$action = New-ScheduledTaskAction -Execute $python -Argument "-m jarvis_core.main" -WorkingDirectory $coreRoot
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited

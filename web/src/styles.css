@@ -59,7 +59,11 @@ button { color: inherit; }
 .dashboard h1 { margin: 0; font-size: 25px; font-weight: 550; }
 .dashboard-header p { margin: 6px 0 0; color: #666; font-size: 12px; }
 .plain-button { border: 0; background: none; display: flex; align-items: center; gap: 8px; color: #aaa; cursor: pointer; }
-.history { display: grid; gap: 14px; }
+.history { display: grid; gap: 18px; }
+.history-day { border-bottom: 1px solid #171717; padding-bottom: 18px; }
+.history-day summary { display: flex; align-items: center; justify-content: space-between; padding: 12px 4px; color: #ddd; cursor: pointer; text-transform: capitalize; }
+.history-day summary small { color: #555; font-size: 11px; font-weight: 400; }
+.history-day-items { display: grid; gap: 14px; padding-top: 8px; }
 .history-item { max-width: 78%; padding: 16px 18px; border-radius: 16px; background: #111; }
 .history-item--user { justify-self: end; background: #fff; color: #000; border-bottom-right-radius: 4px; }
 .history-item--assistant { justify-self: start; border: 1px solid #222; border-bottom-left-radius: 4px; }

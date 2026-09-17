@@ -69,7 +69,7 @@ class Storage:
             """,
             (limit,),
         ).fetchall()
-        return [dict(row) for row in reversed(rows)]
+        return [dict(row) for row in rows]
 
     def memories(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self.connection.execute(

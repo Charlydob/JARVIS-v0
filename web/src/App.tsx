@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { ArrowLeft, Check, History, Menu, Send, ThumbsDown, ThumbsUp, Volume2, VolumeX, X } from 'lucide-react'
 import {
   getHistory,
@@ -15,6 +15,19 @@ import { useContinuousVoice } from './hooks/useContinuousVoice'
 import { JarvisState, stateLabels, transition } from './state/machine'
 
 type View = 'face' | 'dashboard'
+
+function sameLocalDay(left: Date, right: Date) {
+  return left.getFullYear() === right.getFullYear() && left.getMonth() === right.getMonth() && left.getDate() === right.getDate()
+}
+
+function historyDayLabel(date: Date) {
+  const today = new Date()
+  const yesterday = new Date(today)
+  yesterday.setDate(today.getDate() - 1)
+  if (sameLocalDay(date, today)) return 'Hoy'
+  if (sameLocalDay(date, yesterday)) return 'Ayer'
+  return date.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+}
 
 const speechAudio = new Audio()
 speechAudio.preload = 'auto'
@@ -86,6 +99,17 @@ export default function App() {
   const onlineRef = useRef(false)
   const statusCheckedRef = useRef(false)
   const busy = state === 'thinking' || state === 'speaking'
+  const historyByDay = useMemo(() => {
+    const groups = new Map<string, { label: string; items: HistoryItem[] }>()
+    for (const item of history) {
+      const date = new Date(item.created_at)
+      const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
+      const group = groups.get(key) ?? { label: historyDayLabel(date), items: [] }
+      group.items.push(item)
+      groups.set(key, group)
+    }
+    return [...groups.values()]
+  }, [history])
 
   useEffect(() => {
     const unlock = () => unlockSpeech()
@@ -258,18 +282,25 @@ export default function App() {
         <section className="history" aria-live="polite">
           {historyLoading && <p className="empty">Cargando…</p>}
           {!historyLoading && history.length === 0 && <p className="empty">Todavía no hay conversaciones guardadas.</p>}
-          {history.map((item) => (
-            <article key={item.id} className={`history-item history-item--${item.role}`}>
-              <small>{item.role === 'user' ? 'Tú' : 'JARVIS'} · {new Date(item.created_at).toLocaleString()}</small>
-              <p>{item.content}</p>
-              {item.role === 'assistant' && (
-                <div className="feedback">
-                  <button className={item.rating === 'good' ? 'selected' : ''} onClick={() => void rate(item.id, 'good')} aria-label="Respuesta correcta"><ThumbsUp size={15} /></button>
-                  <button className={item.rating === 'bad' ? 'selected' : ''} onClick={() => void rate(item.id, 'bad')} aria-label="Respuesta incorrecta"><ThumbsDown size={15} /></button>
-                  {item.correction && <span><Check size={13} /> Corrección guardada</span>}
-                </div>
-              )}
-            </article>
+          {historyByDay.map((group, groupIndex) => (
+            <details className="history-day" key={group.label} open={groupIndex === 0}>
+              <summary><span>{group.label}</span><small>{group.items.length} mensajes</small></summary>
+              <div className="history-day-items">
+                {group.items.map((item) => (
+                  <article key={item.id} className={`history-item history-item--${item.role}`}>
+                    <small>{item.role === 'user' ? 'Tú' : 'JARVIS'} · {new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small>
+                    <p>{item.content}</p>
+                    {item.role === 'assistant' && (
+                      <div className="feedback">
+                        <button className={item.rating === 'good' ? 'selected' : ''} onClick={() => void rate(item.id, 'good')} aria-label="Respuesta correcta"><ThumbsUp size={15} /></button>
+                        <button className={item.rating === 'bad' ? 'selected' : ''} onClick={() => void rate(item.id, 'bad')} aria-label="Respuesta incorrecta"><ThumbsDown size={15} /></button>
+                        {item.correction && <span><Check size={13} /> Corrección guardada</span>}
+                      </div>
+                    )}
+                  </article>
+                ))}
+              </div>
+            </details>
           ))}
         </section>
 
