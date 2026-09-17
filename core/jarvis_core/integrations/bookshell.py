@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 from datetime import datetime, timedelta
@@ -125,8 +126,13 @@ class BookShellClient:
         if book_id:
             selected = all_books.get(book_id)
             selection = {"found": bool(selected), "book": await self._book_summary({"id": book_id, **selected}) if selected else None}
-        else:
+        elif title:
             selection = await self.current_book(title)
+        else:
+            ordered = self._ordered_books(all_books)
+            reading = [book for book in ordered if str(book.get("status", "")).lower() == "reading"]
+            chosen = (reading or ordered)[0] if ordered else None
+            selection = {"found": bool(chosen), "book": self._summary(chosen) if chosen else None}
         if not selection.get("found"):
             return selection
         summary = dict(selection["book"])
@@ -141,23 +147,41 @@ class BookShellClient:
             "status": "finished" if total_pages and target >= total_pages else "reading",
             "updatedAt": int(time.time() * 1000),
         }
+        write_started = time.perf_counter()
         await self.transaction(f"books/books/{identifier}", current, updated)
-        log_updated = True
+        write_ms = (time.perf_counter() - write_started) * 1000
         delta = target - old_page
-        if delta:
+        async def update_log() -> bool:
+            if not delta:
+                return True
             day = datetime.now(ZoneInfo(self.timezone)).date().isoformat()
             path = f"/data/books/readingLog/{day}/{identifier}"
             try:
                 log_payload = await self._request("GET", path)
                 current_log = int(log_payload.get("data") or 0)
                 await self.transaction(f"books/readingLog/{day}/{identifier}", log_payload.get("data"), current_log + delta)
+                return True
             except httpx.HTTPError:
-                log_updated = False
+                return False
+
+        readback_started = time.perf_counter()
+        persisted_books, log_updated = await asyncio.gather(self.books(), update_log())
+        readback_ms = (time.perf_counter() - readback_started) * 1000
+        persisted = persisted_books.get(identifier) or {}
+        verified = int(persisted.get("currentPage") or -1) == target
+        if not verified:
+            return {
+                "updated": False, "verified": False,
+                "message": "La página no aparece guardada al volver a consultar BookShell.",
+                "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)},
+            }
         return {
             "updated": True,
-            "book": await self._book_summary({"id": identifier, **updated}),
+            "verified": True,
+            "book": self._summary({"id": identifier, **persisted}),
             "previousPage": old_page,
             "readingLogUpdated": log_updated,
+            "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)},
         }
 
     async def create_reminder(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -184,8 +208,36 @@ class BookShellClient:
             "alerts": [{"mode": "relative", "minutesBefore": minutes, "channel": "telegram"}],
             "status": "pending",
         }
+        write_started = time.perf_counter()
         payload = await self._request("POST", "/reminders", json=body)
-        return {"created": bool(payload.get("created", True)), "reminder": payload.get("reminder")}
+        write_ms = (time.perf_counter() - write_started) * 1000
+        reminder = payload.get("reminder") or {}
+        reminder_id = str(reminder.get("id") or payload.get("id") or "")
+        readback_started = time.perf_counter()
+        persisted = await self._request(
+            "GET", "/reminders", params={"from": target_date, "until": target_date, "limit": 100}
+        )
+        readback_ms = (time.perf_counter() - readback_started) * 1000
+        saved = next(
+            (
+                item for item in persisted.get("reminders", [])
+                if (reminder_id and str(item.get("id")) == reminder_id)
+                or (
+                    str(item.get("title")) == body["title"]
+                    and str(item.get("targetDate")) == target_date
+                    and str(item.get("targetTime")) == target_time
+                )
+            ),
+            None,
+        )
+        verified = bool(saved)
+        return {
+            "created": bool(payload.get("created", True)) and verified,
+            "verified": verified,
+            "reminder": saved,
+            "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)},
+            **({"message": "El recordatorio no aparece al volver a consultar BookShell."} if not verified else {}),
+        }
 
     @staticmethod
     def _ordered_books(books: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:

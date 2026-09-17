@@ -90,6 +90,9 @@ async def audio(
     file: UploadFile = File(...),
     duration_ms: int | None = Form(default=None),
     speech_ms: int | None = Form(default=None),
+    max_rms: float | None = Form(default=None),
+    utterance_id: str | None = Form(default=None),
+    conversation_id: str | None = Form(default=None),
 ) -> AudioResponse:
     raw = await file.read(settings.max_audio_bytes + 1)
     if len(raw) > settings.max_audio_bytes:
@@ -104,6 +107,9 @@ async def audio(
                 "content_type": file.content_type or "audio/webm",
                 "duration_ms": duration_ms,
                 "speech_ms": speech_ms,
+                "max_rms": max_rms,
+                "utterance_id": utterance_id,
+                "conversation_id": conversation_id,
             },
         )
         return AudioResponse.model_validate(result)
@@ -114,7 +120,7 @@ async def audio(
 @app.post("/api/tts", tags=["conversation"])
 async def tts(payload: ChatRequest, request: Request) -> Response:
     try:
-        result = await relay(request).request("tts", {"text": payload.message, "language": payload.language})
+        result = await relay(request).request("tts", {"text": payload.message, "language": payload.language, "turn_id": payload.turn_id})
         raw = base64.b64decode(str(result["data"]), validate=True)
         return Response(content=raw, media_type=str(result.get("content_type", "audio/mpeg")))
     except (CoreOfflineError, CoreRequestError, KeyError, ValueError) as exc:

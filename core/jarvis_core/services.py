@@ -17,6 +17,7 @@ from edge_tts import VoicesManager
 from faster_whisper import WhisperModel
 from jarvis_core.config import CoreSettings
 from jarvis_core.feedback import FeedbackLearning
+from jarvis_core.intents import DirectIntent, continue_direct_intent, render_direct_result, route_direct_intent
 from jarvis_core.language import SessionLanguagePolicy, response_language
 from jarvis_core.storage import Storage
 from jarvis_core.tools import ToolRegistry
@@ -30,6 +31,7 @@ No inventes nunca hechos, ubicación, clima, agenda, vivienda, familia, posesion
 No menciones mansiones, desayunos ni detalles personales que el usuario no haya proporcionado.
 Un saludo se responde con brevedad, sin añadir noticias, clima ni supuestos.
 No antepongas etiquetas de rol como «assistant», «user» o «JARVIS» a la respuesta.
+No afirmes que una acción externa se ejecutó salvo que recibas un resultado de tool explícitamente exitoso y verificado.
 Si necesitas información actual y no aparece en un contexto de herramienta, di claramente que no dispones de ella."""
 
 WEATHER_WORDS = ("tiempo", "clima", "lluv", "temperatura", "frío", "frio", "calor", "nubl", "pronóstico", "pronostico", "previsión", "prevision")
@@ -46,6 +48,18 @@ LANGUAGE_NAMES = {
     "de": "German", "en": "English", "es": "Spanish", "fr": "French",
     "it": "Italian", "pt": "Portuguese",
 }
+AUDIO_MIN_DURATION_MS = 500
+AUDIO_MIN_SPEECH_MS = 300
+AUDIO_MIN_RMS = 0.014
+TRANSCRIPT_REPEAT_WINDOW_S = 8.0
+NOISE_TRANSCRIPTS = {
+    "gracias por ver", "gracias por ver el video", "subtitulos", "musica", "silencio",
+    "thank you for watching", "you", "bye",
+}
+
+
+def normalized_transcript(value: str) -> str:
+    return " ".join(re.findall(r"[^\W_]+", value.casefold(), flags=re.UNICODE))
 
 
 class OllamaService:
@@ -72,13 +86,29 @@ class OllamaService:
                 "POST", f"{self.base_url}/api/chat", json=self._payload(messages, context, True)
             ) as response:
                 response.raise_for_status()
+                prefix = ""
+                decided = False
                 async for line in response.aiter_lines():
                     if not line:
                         continue
                     data = json.loads(line)
                     content = str(data.get("message", {}).get("content", ""))
                     if content:
-                        yield content
+                        if decided:
+                            yield content
+                            continue
+                        prefix += content
+                        candidate = prefix.lstrip().casefold()
+                        if candidate and "assistant".startswith(candidate) and "\n" not in prefix and len(candidate) <= len("assistant"):
+                            continue
+                        cleaned = re.sub(r"^\s*assistant\s*:?\s*", "", prefix, flags=re.IGNORECASE)
+                        decided = True
+                        if cleaned:
+                            yield cleaned
+                if prefix and not decided:
+                    cleaned = re.sub(r"^\s*assistant\s*:?\s*", "", prefix, flags=re.IGNORECASE)
+                    if cleaned:
+                        yield cleaned
 
     async def tool_decision(
         self,
@@ -100,6 +130,20 @@ class OllamaService:
             return response.is_success
         except httpx.HTTPError:
             return False
+
+    async def warm(self) -> None:
+        started = time.perf_counter()
+        payload = {
+            "model": self.model, "prompt": "", "stream": False, "keep_alive": "10m",
+            "options": {"num_predict": 0},
+        }
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=5.0)) as client:
+                response = await client.post(f"{self.base_url}/api/generate", json=payload)
+                response.raise_for_status()
+            PERFORMANCE_LOGGER.info("stage=ollama_warm duration_ms=%.1f", (time.perf_counter() - started) * 1000)
+        except httpx.HTTPError:
+            PERFORMANCE_LOGGER.exception("stage=ollama_warm_failed")
 
     async def select_feedback(self, query: str, examples: list[dict[str, Any]]) -> list[str]:
         compact = [
@@ -229,6 +273,11 @@ class JarvisServices:
         self._location_cache: dict[tuple[float, float], str] = {}
         self._geocode_lock = asyncio.Lock()
         self._last_geocode_at = 0.0
+        self._audio_results: dict[str, dict[str, Any]] = {}
+        self._recent_transcripts: dict[str, tuple[str, float]] = {}
+        self._turn_results: dict[str, tuple[dict[str, Any], float]] = {}
+        self._turn_inflight: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._pending_intents: dict[str, DirectIntent] = {}
 
     async def status(self) -> dict[str, Any]:
         return {
@@ -248,12 +297,37 @@ class JarvisServices:
             return await self._chat(payload)
         if action == "audio":
             started = time.perf_counter()
+            utterance_id = str(payload.get("utterance_id") or uuid4())
+            if utterance_id in self._audio_results:
+                LOGGER.info("utterance_id=%s discard_reason=duplicate_utterance", utterance_id)
+                return self._audio_results[utterance_id]
             raw = base64.b64decode(str(payload["data"]), validate=True)
             content_type = str(payload.get("content_type", "audio/webm"))
+            duration_ms = float(payload.get("duration_ms") or 0)
+            speech_ms = float(payload.get("speech_ms") or 0)
+            max_rms = float(payload.get("max_rms") or 0)
             LOGGER.info(
-                "Audio received: bytes=%d content_type=%s capture_ms=%s speech_ms=%s",
-                len(raw), content_type, payload.get("duration_ms"), payload.get("speech_ms"),
+                "utterance_id=%s audio_duration=%.0f speech_ms=%.0f rms=%.4f bytes=%d content_type=%s",
+                utterance_id, duration_ms, speech_ms, max_rms, len(raw), content_type,
             )
+            discard_reason = None
+            if duration_ms < AUDIO_MIN_DURATION_MS:
+                discard_reason = "audio_too_short"
+            elif speech_ms < AUDIO_MIN_SPEECH_MS:
+                discard_reason = "speech_too_short"
+            elif max_rms < AUDIO_MIN_RMS:
+                discard_reason = "energy_too_low"
+            elif len(raw) < 1000:
+                discard_reason = "audio_too_small"
+            if discard_reason:
+                result = {
+                    "transcript": "", "language": "es", "language_confidence": 0,
+                    "provider": "faster-whisper", "detail": "discarded", "discard_reason": discard_reason,
+                    "utterance_id": utterance_id,
+                }
+                LOGGER.info("utterance_id=%s transcript=%r discard_reason=%s", utterance_id, "", discard_reason)
+                self._audio_results[utterance_id] = result
+                return result
             transcript, language, metadata = await self.stt.transcribe(raw, content_type)
             LOGGER.info(
                 "Whisper result: language=%s probability=%s decoded_s=%s after_vad_s=%s transcript=%r",
@@ -263,18 +337,39 @@ class JarvisServices:
                 metadata["duration_after_vad_s"],
                 transcript,
             )
-            if not transcript:
-                LOGGER.warning("Audio discarded after Whisper: empty transcript")
+            normalized = normalized_transcript(transcript)
+            conversation_key = str(payload.get("conversation_id") or "global")
+            now = time.monotonic()
+            previous = self._recent_transcripts.get(conversation_key)
+            discard_reason = None
+            if not normalized:
+                discard_reason = "empty_transcript"
+            elif normalized in NOISE_TRANSCRIPTS or len(normalized.replace(" ", "")) < 2:
+                discard_reason = "noise_transcript"
+            elif previous and previous[0] == normalized and now - previous[1] <= TRANSCRIPT_REPEAT_WINDOW_S:
+                discard_reason = "duplicate_transcript"
+            if discard_reason:
+                transcript = ""
+            else:
+                self._recent_transcripts[conversation_key] = (normalized, now)
+            LOGGER.info("utterance_id=%s transcript=%r discard_reason=%s", utterance_id, transcript, discard_reason or "none")
             PERFORMANCE_LOGGER.info("stage=stt duration_ms=%.1f", (time.perf_counter() - started) * 1000)
-            return {
+            result = {
                 "transcript": transcript, "language": language,
                 "language_confidence": metadata["language_probability"],
-                "provider": "faster-whisper", "detail": "complete",
+                "provider": "faster-whisper", "detail": "discarded" if discard_reason else "complete",
+                "discard_reason": discard_reason, "utterance_id": utterance_id,
             }
+            self._audio_results[utterance_id] = result
+            if len(self._audio_results) > 200:
+                self._audio_results.pop(next(iter(self._audio_results)))
+            return result
         if action == "tts":
             started = time.perf_counter()
             raw = await self.tts.synthesize(str(payload["text"]), payload.get("language"))
-            PERFORMANCE_LOGGER.info("stage=tts_first_audio duration_ms=%.1f", (time.perf_counter() - started) * 1000)
+            duration_ms = (time.perf_counter() - started) * 1000
+            PERFORMANCE_LOGGER.info("turn_id=%s stage=tts_first_audio duration_ms=%.1f", payload.get("turn_id"), duration_ms)
+            PERFORMANCE_LOGGER.info("turn_id=%s stage=tts_total duration_ms=%.1f", payload.get("turn_id"), duration_ms)
             return {"data": base64.b64encode(raw).decode("ascii"), "content_type": "audio/mpeg"}
         if action == "history":
             return {"items": self.storage.history(int(payload.get("limit", 100)))}
@@ -300,9 +395,96 @@ class JarvisServices:
         payload: dict[str, Any],
         on_chunk: Callable[[str], Awaitable[None]],
     ) -> dict[str, Any]:
+        turn_id = str(payload.get("turn_id") or uuid4())
+        now = time.monotonic()
+        cached = self._turn_results.get(turn_id)
+        if cached and now - cached[1] < 300:
+            TOOL_LOGGER.info("turn_id=%s discard_reason=duplicate_turn", turn_id)
+            await on_chunk(str(cached[0].get("message", "")))
+            return cached[0]
+        pending = self._turn_inflight.get(turn_id)
+        if pending is not None:
+            result = await pending
+            TOOL_LOGGER.info("turn_id=%s discard_reason=duplicate_turn_inflight", turn_id)
+            await on_chunk(str(result.get("message", "")))
+            return result
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._turn_inflight[turn_id] = future
+        try:
+            result = await self._chat_stream_once({**payload, "turn_id": turn_id}, on_chunk)
+            result["turn_id"] = turn_id
+            self._turn_results[turn_id] = (result, time.monotonic())
+            if len(self._turn_results) > 200:
+                self._turn_results.pop(next(iter(self._turn_results)))
+            future.set_result(result)
+            return result
+        except Exception as exc:
+            future.set_exception(exc)
+            future.exception()
+            raise
+        finally:
+            self._turn_inflight.pop(turn_id, None)
+
+    async def _chat_stream_once(
+        self,
+        payload: dict[str, Any],
+        on_chunk: Callable[[str], Awaitable[None]],
+    ) -> dict[str, Any]:
         message = str(payload["message"]).strip()
         conversation_id = str(payload.get("conversation_id") or uuid4())
+        turn_id = str(payload["turn_id"])
         total_started = time.perf_counter()
+        routing_started = time.perf_counter()
+        today = datetime.now().astimezone().date()
+        direct = route_direct_intent(message, today)
+        if direct is None and conversation_id in self._pending_intents:
+            direct = continue_direct_intent(self._pending_intents[conversation_id], message, today)
+        PERFORMANCE_LOGGER.info(
+            "turn_id=%s stage=intent_routing duration_ms=%.1f direct=%s",
+            turn_id, (time.perf_counter() - routing_started) * 1000, direct.kind if direct else "none",
+        )
+        user_language = self.languages.resolve(
+            conversation_id, message, payload.get("language"), payload.get("language_confidence")
+        )
+        if direct:
+            if direct.clarification:
+                answer = direct.clarification
+                self._pending_intents[conversation_id] = direct
+            elif direct.tool and direct.arguments is not None:
+                self._pending_intents.pop(conversation_id, None)
+                tool_call_id = str(uuid4())
+                TOOL_LOGGER.info(
+                    "turn_id=%s tool_call_id=%s event=tool_requested tool=%s arguments=%s",
+                    turn_id, tool_call_id, direct.tool, json.dumps(direct.arguments, ensure_ascii=False),
+                )
+                tool_started = time.perf_counter()
+                try:
+                    raw_result = await self.tools.execute(direct.tool, direct.arguments)
+                    parsed = json.loads(raw_result)
+                    self._log_tool_timings(turn_id, tool_call_id, parsed)
+                    succeeded = self._tool_succeeded(raw_result, direct.tool)
+                    TOOL_LOGGER.info(
+                        "turn_id=%s tool_call_id=%s event=%s tool=%s duration_ms=%.1f",
+                        turn_id, tool_call_id, "tool_success" if succeeded else "tool_error", direct.tool,
+                        (time.perf_counter() - tool_started) * 1000,
+                    )
+                    answer = render_direct_result(direct.kind, parsed if isinstance(parsed, dict) else {})
+                except Exception:
+                    TOOL_LOGGER.exception("turn_id=%s tool_call_id=%s event=tool_error tool=%s", turn_id, tool_call_id, direct.tool)
+                    answer = "No se pudo guardar, señor." if direct.kind in {"book_update", "reminder_create"} else "No he podido consultar BookShell, señor."
+                PERFORMANCE_LOGGER.info(
+                    "turn_id=%s stage=tool_execution_and_readback duration_ms=%.1f",
+                    turn_id, (time.perf_counter() - tool_started) * 1000,
+                )
+            else:
+                answer = "No he podido completar la solicitud, señor."
+            await on_chunk(answer)
+            result = self._store_chat_result(conversation_id, message, answer, user_language)
+            PERFORMANCE_LOGGER.info(
+                "turn_id=%s stage=total duration_ms=%.1f path=direct", turn_id,
+                (time.perf_counter() - total_started) * 1000,
+            )
+            return result
         context_started = time.perf_counter()
         previous = self.storage.conversation(conversation_id, limit=8)
 
@@ -320,12 +502,6 @@ class JarvisServices:
 
         context, feedback_context = await asyncio.gather(timed_context(), timed_feedback())
         PERFORMANCE_LOGGER.info("stage=context duration_ms=%.1f history=%d", (time.perf_counter() - context_started) * 1000, len(previous))
-        user_language = self.languages.resolve(
-            conversation_id,
-            message,
-            payload.get("language"),
-            payload.get("language_confidence"),
-        )
         language_name = LANGUAGE_NAMES.get(user_language.split("-", 1)[0].lower(), user_language)
         language_context = (
             f"OUTPUT LANGUAGE REQUIREMENT: {language_name} ({user_language}). "
@@ -349,7 +525,7 @@ class JarvisServices:
         if len(re.findall(r"[^\W\d_]+", message, flags=re.UNICODE)) <= 3 and previous:
             routing_message = " ".join(str(item.get("content", "")) for item in previous[-2:]) + " " + message
         definitions = self.tools.definitions_for(routing_message)
-        PERFORMANCE_LOGGER.info("stage=tool_selection duration_ms=%.1f tools=%d", (time.perf_counter() - routing_started) * 1000, len(definitions))
+        PERFORMANCE_LOGGER.info("turn_id=%s stage=tool_schema_selection duration_ms=%.1f tools=%d", turn_id, (time.perf_counter() - routing_started) * 1000, len(definitions))
         if definitions:
             direct_query = self.tools.direct_query(routing_message)
             if direct_query:
@@ -359,33 +535,38 @@ class JarvisServices:
             else:
                 decision_started = time.perf_counter()
                 decision = await self.ollama.tool_decision(conversation, context, definitions)
-                PERFORMANCE_LOGGER.info("stage=ollama_tool_decision duration_ms=%.1f", (time.perf_counter() - decision_started) * 1000)
+                PERFORMANCE_LOGGER.info("turn_id=%s stage=pre_llm duration_ms=%.1f", turn_id, (time.perf_counter() - decision_started) * 1000)
             tool_calls = list(decision.get("tool_calls") or [])
             if tool_calls:
                 conversation.append(decision)
                 authoritative_results: list[str] = []
                 failure_messages: list[str] = []
                 for call in tool_calls:
+                    tool_call_id = str(call.get("id") or uuid4())
                     function = dict(call.get("function") or {})
                     name = str(function.get("name", ""))
                     arguments = function.get("arguments") or {}
                     if not isinstance(arguments, dict):
                         arguments = json.loads(str(arguments))
-                    TOOL_LOGGER.info("event=tool_requested tool=%s arguments=%s", name, json.dumps(arguments, ensure_ascii=False))
+                    TOOL_LOGGER.info("turn_id=%s tool_call_id=%s event=tool_requested tool=%s arguments=%s", turn_id, tool_call_id, name, json.dumps(arguments, ensure_ascii=False))
                     tool_started = time.perf_counter()
                     try:
                         result = await self.tools.execute(name, arguments)
-                        TOOL_LOGGER.info("event=tool_executed tool=%s duration_ms=%.1f", name, (time.perf_counter() - tool_started) * 1000)
-                        if self._tool_succeeded(result):
-                            TOOL_LOGGER.info("event=tool_success tool=%s", name)
+                        try:
+                            self._log_tool_timings(turn_id, tool_call_id, json.loads(result))
+                        except json.JSONDecodeError:
+                            pass
+                        TOOL_LOGGER.info("turn_id=%s tool_call_id=%s event=tool_executed tool=%s duration_ms=%.1f", turn_id, tool_call_id, name, (time.perf_counter() - tool_started) * 1000)
+                        if self._tool_succeeded(result, name):
+                            TOOL_LOGGER.info("turn_id=%s tool_call_id=%s event=tool_success tool=%s", turn_id, tool_call_id, name)
                         else:
-                            TOOL_LOGGER.warning("event=tool_error tool=%s result=%s", name, result)
+                            TOOL_LOGGER.warning("turn_id=%s tool_call_id=%s event=tool_error tool=%s result=%s", turn_id, tool_call_id, name, result)
                             failure_messages.append(self._tool_failure_message(result))
                     except Exception as exc:
-                        TOOL_LOGGER.exception("event=tool_error tool=%s", name)
+                        TOOL_LOGGER.exception("turn_id=%s tool_call_id=%s event=tool_error tool=%s", turn_id, tool_call_id, name)
                         result = json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
                         failure_messages.append("No he podido completar esa acción.")
-                    PERFORMANCE_LOGGER.info("stage=tool_execution duration_ms=%.1f tool=%s", (time.perf_counter() - tool_started) * 1000, name)
+                    PERFORMANCE_LOGGER.info("turn_id=%s stage=tool_execution_and_readback duration_ms=%.1f tool=%s", turn_id, (time.perf_counter() - tool_started) * 1000, name)
                     conversation.append({"role": "tool", "tool_name": name, "content": result})
                     authoritative_results.append(f"{name}: {result}")
                 if failure_messages:
@@ -415,20 +596,21 @@ class JarvisServices:
 
         chunks: list[str] = []
         ollama_started = time.perf_counter()
+        ollama_stage = "second_llm" if definitions else "ollama"
         first_token = True
         async for chunk in self.ollama.chat_stream(conversation, context):
             if first_token:
-                PERFORMANCE_LOGGER.info("stage=ollama_first_token duration_ms=%.1f", (time.perf_counter() - ollama_started) * 1000)
+                PERFORMANCE_LOGGER.info("turn_id=%s stage=%s_ttft duration_ms=%.1f", turn_id, ollama_stage, (time.perf_counter() - ollama_started) * 1000)
                 first_token = False
             chunks.append(chunk)
             await on_chunk(chunk)
-        PERFORMANCE_LOGGER.info("stage=ollama_total duration_ms=%.1f", (time.perf_counter() - ollama_started) * 1000)
+        PERFORMANCE_LOGGER.info("turn_id=%s stage=%s_total duration_ms=%.1f", turn_id, ollama_stage, (time.perf_counter() - ollama_started) * 1000)
         answer = "".join(chunks).strip()
-        PERFORMANCE_LOGGER.info("stage=chat_total duration_ms=%.1f path=%s", (time.perf_counter() - total_started) * 1000, "tool" if definitions else "fast")
+        PERFORMANCE_LOGGER.info("turn_id=%s stage=total duration_ms=%.1f path=%s", turn_id, (time.perf_counter() - total_started) * 1000, "tool" if definitions else "fast")
         return self._store_chat_result(conversation_id, message, answer, user_language)
 
     @staticmethod
-    def _tool_succeeded(result: str) -> bool:
+    def _tool_succeeded(result: str, tool_name: str = "") -> bool:
         try:
             payload = json.loads(result)
         except (json.JSONDecodeError, TypeError):
@@ -438,7 +620,27 @@ class JarvisServices:
         if any(payload.get(key) for key in ("error", "clarificationRequired", "confirmationRequired", "configurationRequired", "ambiguous")):
             return False
         action_flags = [key for key in ("created", "updated", "stored", "deleted", "completed") if key in payload]
-        return all(payload[key] is True for key in action_flags) if action_flags else True
+        successful = all(payload[key] is True for key in action_flags) if action_flags else True
+        if tool_name in {
+            "bookshell_update_progress", "bookshell_create_reminder", "bookshell_gym_write",
+            "bookshell_notes_write", "bookshell_finance_create",
+        }:
+            return successful and payload.get("verified") is True
+        return successful
+
+    @staticmethod
+    def _log_tool_timings(turn_id: str, tool_call_id: str, payload: Any) -> None:
+        if not isinstance(payload, dict) or not isinstance(payload.get("_timings"), dict):
+            return
+        timings = payload["_timings"]
+        PERFORMANCE_LOGGER.info(
+            "turn_id=%s tool_call_id=%s stage=tool_execution duration_ms=%s",
+            turn_id, tool_call_id, timings.get("write_ms"),
+        )
+        PERFORMANCE_LOGGER.info(
+            "turn_id=%s tool_call_id=%s stage=readback_verification duration_ms=%s",
+            turn_id, tool_call_id, timings.get("readback_ms"),
+        )
 
     @staticmethod
     def _tool_failure_message(result: str) -> str:
@@ -456,6 +658,7 @@ class JarvisServices:
     def _store_chat_result(
         self, conversation_id: str, message: str, answer: str, fallback_language: str
     ) -> dict[str, Any]:
+        answer = re.sub(r"^\s*assistant\s*:?\s*", "", answer, flags=re.IGNORECASE).strip()
         language = fallback_language
         self.storage.add_message(conversation_id, "user", message)
         message_id = self.storage.add_message(conversation_id, "assistant", answer)

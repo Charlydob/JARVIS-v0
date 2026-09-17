@@ -16,7 +16,14 @@ class FakeClient:
         return self.values.get(path)
 
     async def put_data(self, path: str, value: Any) -> dict[str, Any]:
-        self.writes.append(("put", path, value)); return {"ok": True}
+        self.writes.append(("put", path, value))
+        parts = path.split("/")
+        if parts[:2] == ["notes", "notes"]:
+            self.values.setdefault("notes/notes", {})[parts[2]] = value
+        if parts[:3] == ["gym", "gym", "workouts"]:
+            root = self.values.setdefault("gym/gym", {})
+            root.setdefault("workouts", {}).setdefault(parts[3], {})[parts[4]] = value
+        return {"ok": True}
 
     async def patch_data(self, path: str, value: Any) -> dict[str, Any]:
         self.writes.append(("patch", path, value)); return {"ok": True}
@@ -74,6 +81,7 @@ def test_finance_fixture_write_uses_shortcut_and_idempotency() -> None:
         "category": "Comida", "account": "Principal", "date": "2026-09-17", "idempotency_key": "fixture-1",
     }))
     assert result["movementId"] == "fixture-movement"
+    assert result["verified"] is False
     assert client.request is not None
     assert client.request[1] == "/shortcuts/finance/movements"
     assert client.request[2]["headers"]["Idempotency-Key"] == "fixture-1"
@@ -86,6 +94,7 @@ def test_world_note_and_recipe_writes_use_existing_data_paths() -> None:
     note = asyncio.run(domains.notes_write({"action": "create", "title": "Fixture", "content": "Text"}))
     recipe = asyncio.run(domains.recipes_write({"action": "create", "title": "Fixture recipe"}))
     assert world["created"] and note["created"] and recipe["created"]
+    assert note["verified"] is True
     assert [path.split("/")[0] for _, path, _ in client.writes] == ["world", "notes", "recipes"]
 
 

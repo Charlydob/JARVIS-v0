@@ -38,13 +38,16 @@ def test_reminder_uses_canonical_endpoint() -> None:
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured.update(json.loads(request.content))
-        return httpx.Response(201, json={"ok": True, "created": True, "reminder": {"id": "reminder-1", **captured}})
+        if request.method == "POST":
+            captured.update(json.loads(request.content))
+            return httpx.Response(201, json={"ok": True, "created": True, "reminder": {"id": "reminder-1", **captured}})
+        return httpx.Response(200, json={"reminders": [{"id": "reminder-1", **captured}]})
 
     client = BookShellClient(transport=httpx.MockTransport(handler))
     result = asyncio.run(client.create_reminder({"title": "Clase de alemán", "target_date": "2026-09-19", "target_time": "18:00", "minutes_before": 60}))
 
     assert result["created"] is True
+    assert result["verified"] is True
     assert captured["timezone"] == "Europe/Zurich"
     assert captured["alerts"][0]["minutesBefore"] == 60
 

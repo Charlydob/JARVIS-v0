@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=16_000)
     conversation_id: str | None = None
+    turn_id: str | None = Field(default=None, min_length=8, max_length=128)
     language: str | None = Field(default=None, min_length=2, max_length=16)
     language_confidence: float | None = Field(default=None, ge=0, le=1)
     latitude: float | None = Field(default=None, ge=-90, le=90)
@@ -18,6 +19,7 @@ class ChatResponse(BaseModel):
     conversation_id: str
     message_id: str
     language: str | None = None
+    turn_id: str | None = None
 
 
 class AudioResponse(BaseModel):
@@ -26,6 +28,8 @@ class AudioResponse(BaseModel):
     language_confidence: float | None = None
     provider: str
     detail: str = "complete"
+    discard_reason: str | None = None
+    utterance_id: str | None = None
 
 
 class FeedbackRequest(BaseModel):

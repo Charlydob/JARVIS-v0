@@ -90,8 +90,13 @@ class BookShellDomains:
             patch = {"updatedAt": now}
             if arguments.get("name"):
                 patch["name"] = str(arguments["name"])
-            await self.client.patch_data(f"gym/gym/workouts/{found['date']}/{session_id}", patch)
-            return {"updated": True, "sessionId": session_id, "patch": patch}
+            write_started = time.perf_counter(); await self.client.patch_data(f"gym/gym/workouts/{found['date']}/{session_id}", patch); write_ms = (time.perf_counter() - write_started) * 1000
+            readback_started = time.perf_counter()
+            persisted = await self.client.data("gym/gym") or {}
+            readback_ms = (time.perf_counter() - readback_started) * 1000
+            saved = ((persisted.get("workouts") or {}).get(found["date"]) or {}).get(session_id)
+            verified = bool(saved) and all(saved.get(key) == value for key, value in patch.items())
+            return {"updated": verified, "verified": verified, "sessionId": session_id, "patch": patch, "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}}
 
         workout_id = str(uuid4())
         exercises: dict[str, Any] = {}
@@ -126,8 +131,13 @@ class BookShellDomains:
             "totalVolumeKg": sum(float(s.get("kg") or 0) * int(s.get("reps") or 0) for e in exercises.values() for s in e["sets"]),
             "updatedAt": now,
         }
-        await self.client.put_data(f"gym/gym/workouts/{date}/{workout_id}", workout)
-        return {"created": True, "workout": self._workout_summary(workout)}
+        write_started = time.perf_counter(); await self.client.put_data(f"gym/gym/workouts/{date}/{workout_id}", workout); write_ms = (time.perf_counter() - write_started) * 1000
+        readback_started = time.perf_counter()
+        persisted = await self.client.data("gym/gym") or {}
+        readback_ms = (time.perf_counter() - readback_started) * 1000
+        saved = ((persisted.get("workouts") or {}).get(date) or {}).get(workout_id)
+        verified = bool(saved)
+        return {"created": verified, "verified": verified, "workout": self._workout_summary(saved or workout), "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}}
 
     async def habits_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
         root = await self.client.data("habits") or {}
@@ -239,7 +249,12 @@ class BookShellDomains:
         }
         bucket = datetime.now(self.zone).strftime("%Y%m%d%H%M")
         idem = str(arguments.get("idempotency_key") or hashlib.sha256((json.dumps(body, sort_keys=True) + bucket).encode()).hexdigest())
-        return await self.client._request("POST", "/shortcuts/finance/movements", json=body, headers={"Idempotency-Key": idem})
+        write_started = time.perf_counter(); payload = await self.client._request("POST", "/shortcuts/finance/movements", json=body, headers={"Idempotency-Key": idem}); write_ms = (time.perf_counter() - write_started) * 1000
+        movement_id = str(payload.get("movementId") or payload.get("id") or "")
+        readback_started = time.perf_counter(); persisted = await self.client.data("finance/finance") or {}; readback_ms = (time.perf_counter() - readback_started) * 1000
+        saved = (persisted.get("transactions") or {}).get(movement_id) if movement_id else None
+        verified = bool(saved)
+        return {**payload, "created": verified, "verified": verified, "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}, **({"message": "El movimiento no aparece al volver a consultar BookShell."} if not verified else {})}
 
     async def reminders_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
         params = {key: arguments[key] for key in ("status", "from", "until", "limit") if arguments.get(key) is not None}
@@ -326,12 +341,22 @@ class BookShellDomains:
             note_id = str(arguments.get("note_id") or "")
             if not note_id:
                 return {"updated": False, "clarificationRequired": True, "message": "Falta identificar la nota."}
-            await self.client.patch_data(f"notes/notes/{note_id}", {**allowed, "updatedAt": now})
-            return {"updated": True, "id": note_id}
+            write_started = time.perf_counter(); await self.client.patch_data(f"notes/notes/{note_id}", {**allowed, "updatedAt": now}); write_ms = (time.perf_counter() - write_started) * 1000
+            readback_started = time.perf_counter()
+            persisted = await self.client.data("notes/notes") or {}
+            readback_ms = (time.perf_counter() - readback_started) * 1000
+            saved = persisted.get(note_id)
+            verified = bool(saved) and all(saved.get(key) == value for key, value in allowed.items())
+            return {"updated": verified, "verified": verified, "id": note_id, "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}}
         note_id = str(uuid4())
         note = {"type": "text", "category": "Normal", "tags": [], **allowed, "createdAt": now, "updatedAt": now}
-        await self.client.put_data(f"notes/notes/{note_id}", note)
-        return {"created": True, "id": note_id, "note": note}
+        write_started = time.perf_counter(); await self.client.put_data(f"notes/notes/{note_id}", note); write_ms = (time.perf_counter() - write_started) * 1000
+        readback_started = time.perf_counter()
+        persisted = await self.client.data("notes/notes") or {}
+        readback_ms = (time.perf_counter() - readback_started) * 1000
+        saved = persisted.get(note_id)
+        verified = bool(saved)
+        return {"created": verified, "verified": verified, "id": note_id, "note": saved or note, "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}}
 
     async def recipes_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
         recipes = await self.client.data("recipes/items") or {}

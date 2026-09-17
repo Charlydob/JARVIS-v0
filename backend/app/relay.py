@@ -142,7 +142,10 @@ class CoreRelay:
                     item = await queue.get()
                     if item is None:
                         break
-                    yield {"type": "chunk", "content": str(item.get("content", ""))}
+                    yield {
+                        "type": "chunk", "content": str(item.get("content", "")),
+                        "event_id": item.get("event_id"), "turn_id": item.get("turn_id"),
+                    }
                 message = await future
         except TimeoutError as exc:
             raise CoreRequestError(f"Core timed out while handling {action}") from exc
@@ -155,4 +158,4 @@ class CoreRelay:
         result = message.get("result")
         if not isinstance(result, dict):
             raise CoreRequestError("Core returned an invalid response")
-        yield {"type": "result", **result}
+        yield {"type": "result", "event_id": str(message.get("event_id") or f"{request_id}:result"), **result}

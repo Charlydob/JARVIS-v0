@@ -52,13 +52,20 @@ async def handle_request(
         action = str(message.get("action", ""))
         payload = dict(message.get("payload") or {})
         if action == "chat_stream":
+            sequence = 0
             async def emit_chunk(chunk: str) -> None:
-                await send_json(socket, lock, {"type": "chunk", "id": request_id, "content": chunk})
+                nonlocal sequence
+                sequence += 1
+                turn_id = str(payload.get("turn_id") or request_id)
+                await send_json(socket, lock, {
+                    "type": "chunk", "id": request_id, "content": chunk,
+                    "turn_id": turn_id, "event_id": f"{turn_id}:chunk:{sequence}",
+                })
 
             result = await services.chat_stream(payload, emit_chunk)
         else:
             result = await services.dispatch(action, payload)
-        response = {"type": "result", "id": request_id, "ok": True, "result": result}
+        response = {"type": "result", "id": request_id, "event_id": f"{payload.get('turn_id') or request_id}:result", "ok": True, "result": result}
     except Exception as exc:
         LOGGER.exception("Core request failed: %s", message.get("action"))
         response = {"type": "result", "id": request_id, "ok": False, "error": str(exc)}
@@ -66,8 +73,12 @@ async def handle_request(
 
 
 async def heartbeat(socket: ClientConnection, lock: asyncio.Lock, services: JarvisServices) -> None:
+    count = 0
     while True:
         await asyncio.sleep(20)
+        count += 1
+        if count % 15 == 0:
+            await services.ollama.warm()
         await send_json(socket, lock, {"type": "heartbeat", "metadata": await services.status()})
 
 
@@ -83,6 +94,7 @@ async def connected_session(settings: CoreSettings, services: JarvisServices) ->
         LOGGER.info("Connected securely to gateway")
         lock = asyncio.Lock()
         await send_json(socket, lock, {"type": "hello", "metadata": await services.status()})
+        asyncio.create_task(services.ollama.warm())
         heartbeat_task = asyncio.create_task(heartbeat(socket, lock, services))
         tasks: set[asyncio.Task[None]] = set()
         try:
