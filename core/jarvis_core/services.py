@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -37,6 +38,9 @@ DetectorFactory.seed = 0
 
 
 def response_language(text: str, fallback: str | None = None) -> str:
+    words = re.findall(r"[^\W\d_]+", text.lower(), flags=re.UNICODE)
+    if fallback and len(words) >= 8 and len(set(words)) / len(words) < 0.25:
+        return fallback
     try:
         return detect(text)
     except LangDetectException:

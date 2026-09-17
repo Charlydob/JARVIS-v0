@@ -3,7 +3,11 @@ from pathlib import Path
 import pytest
 
 from jarvis_core.config import CoreSettings
-from jarvis_core.services import JarvisServices
+from jarvis_core.services import JarvisServices, response_language
+
+
+def test_repetitive_answer_keeps_known_input_language() -> None:
+    assert response_language("Here is the list: " + "test " * 50, "en") == "en"
 
 
 @pytest.mark.asyncio

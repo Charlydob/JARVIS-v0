@@ -206,7 +206,7 @@ export default function App() {
         speechBuffer = split.remainder
         for (const segment of split.segments) {
           speechQueue = speechQueue.then(async () => {
-            const speech = await synthesizeSpeech(segment)
+            const speech = await synthesizeSpeech(segment, language)
             await playAudio(speech)
           }).catch(() => { speechFailed = true })
         }
