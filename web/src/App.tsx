@@ -54,18 +54,23 @@ function silentWav(): Blob {
   return new Blob([buffer], { type: 'audio/wav' })
 }
 
-function unlockSpeech(force = false) {
-  if (speechUnlocked && !force) return
+async function unlockSpeech(): Promise<boolean> {
+  if (speechUnlocked) return true
   const url = URL.createObjectURL(silentWav())
   speechAudio.src = url
   speechAudio.volume = 0.01
-  void speechAudio.play().then(() => {
+  try {
+    await speechAudio.play()
     speechAudio.pause()
     speechAudio.currentTime = 0
     speechAudio.volume = 1
     speechUnlocked = true
+    return true
+  } catch {
+    return false
+  } finally {
     URL.revokeObjectURL(url)
-  }).catch(() => URL.revokeObjectURL(url))
+  }
 }
 
 function playAudio(blob: Blob): Promise<void> {
@@ -87,6 +92,7 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [muted, setMuted] = useState(() => localStorage.getItem('jarvis-muted') === 'true')
   const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem('jarvis-sound') !== 'false')
+  const [voiceReady, setVoiceReady] = useState(false)
   const [location, setLocation] = useState<UserLocation>()
   const [coreOnline, setCoreOnline] = useState(false)
   const [notice, setNotice] = useState('Conectando con el Core…')
@@ -112,14 +118,11 @@ export default function App() {
   }, [history])
 
   useEffect(() => {
-    const unlock = () => unlockSpeech()
-    window.addEventListener('pointerdown', unlock, { once: true, capture: true })
     navigator.geolocation?.getCurrentPosition(
       ({ coords }) => setLocation({ latitude: coords.latitude, longitude: coords.longitude }),
       () => undefined,
       { enableHighAccuracy: false, maximumAge: 15 * 60 * 1000, timeout: 8000 }
     )
-    return () => window.removeEventListener('pointerdown', unlock, { capture: true })
   }, [])
 
   const refreshHistory = useCallback(async () => {
@@ -149,7 +152,7 @@ export default function App() {
             setNotice('Pulsa la cara para volver a escuchar')
           } else {
             dispatch({ type: 'CORE_ONLINE' })
-            setNotice(status.core?.ollama_ready === false ? 'Core conectado · Ollama no responde' : 'Estoy escuchando')
+            setNotice(status.core?.ollama_ready === false ? 'Core conectado · Ollama no responde' : voiceReady ? 'Estoy escuchando' : 'Estoy escuchando · toca la boca para activar mi voz')
           }
         }
       } catch {
@@ -167,7 +170,7 @@ export default function App() {
     void poll()
     const interval = window.setInterval(poll, 5000)
     return () => { cancelled = true; window.clearInterval(interval) }
-  }, [muted])
+  }, [muted, voiceReady])
 
   useEffect(() => {
     if (view === 'dashboard') void refreshHistory()
@@ -184,26 +187,42 @@ export default function App() {
       setNotice(response.message)
       dispatch({ type: 'RESPONSE' })
       void refreshHistory()
-      if (soundEnabled && !muted) {
+      if (soundEnabled && voiceReady && !muted) {
         try {
           const speech = await synthesizeSpeech(response.message)
           await playAudio(speech)
         } catch {
-          setNotice(`${response.message}\nLa respuesta de voz no se pudo reproducir.`)
+          setVoiceReady(false)
+          setNotice(`${response.message}\nToca la boca para volver a activar la voz.`)
         }
+      } else if (soundEnabled && !voiceReady) {
+        setNotice(`${response.message}\nToca la boca para activar la voz.`)
       }
       dispatch({ type: 'SPEECH_END' })
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'No he podido completar la solicitud')
       dispatch({ type: 'FAIL' })
     }
-  }, [coreOnline, location, muted, refreshHistory, soundEnabled])
+  }, [coreOnline, location, muted, refreshHistory, soundEnabled, voiceReady])
 
   const toggleSound = () => {
+    if (!voiceReady) {
+      void unlockSpeech().then((ready) => {
+        setVoiceReady(ready)
+        if (ready) {
+          setSoundEnabled(true)
+          localStorage.setItem('jarvis-sound', 'true')
+          setNotice('Voz activada. Estoy escuchando.')
+        } else {
+          setNotice('Safari no ha permitido el audio. Vuelve a tocar la boca.')
+        }
+      })
+      return
+    }
     const next = !soundEnabled
-    if (next) unlockSpeech(true)
     setSoundEnabled(next)
     localStorage.setItem('jarvis-sound', String(next))
+    setNotice(next ? 'Voz activada. Estoy escuchando.' : 'Voz silenciada. Seguiré respondiendo por texto.')
   }
 
   const processAudio = useCallback(async (audio: Blob) => {
@@ -225,7 +244,7 @@ export default function App() {
 
   useContinuousVoice({
     enabled: coreOnline && !muted && !busy && view === 'face' && state !== 'error',
-    onListening: useCallback(() => { unlockSpeech(); dispatch({ type: 'START_LISTENING' }) }, []),
+    onListening: useCallback(() => dispatch({ type: 'START_LISTENING' }), []),
     onUtterance: useCallback((audio) => { void processAudio(audio) }, [processAudio]),
     onError: useCallback((message) => { setNotice(message); dispatch({ type: 'FAIL' }) }, [])
   })
@@ -331,13 +350,14 @@ export default function App() {
         <nav className="menu">
           <button onClick={() => { setView('dashboard'); setMenuOpen(false) }}><History size={18} /> Historial</button>
           <button onClick={toggleSound}>
-            {soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />} Voz {soundEnabled ? 'activada' : 'desactivada'}
+            {soundEnabled && voiceReady ? <Volume2 size={18} /> : <VolumeX size={18} />} {voiceReady ? `Voz ${soundEnabled ? 'activada' : 'desactivada'}` : 'Activar voz'}
           </button>
+          <a className="menu-attribution" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">Ubicación © OpenStreetMap</a>
         </nav>
       )}
 
       <section className="presence">
-        <JarvisFace state={state} voiceEnabled={soundEnabled} onClick={toggleMute} onToggleVoice={toggleSound} />
+        <JarvisFace state={state} voiceEnabled={soundEnabled && voiceReady} onClick={toggleMute} onToggleVoice={toggleSound} />
         <p className="state-label">{stateLabels[state]}</p>
         <p className="notice">{notice}</p>
       </section>

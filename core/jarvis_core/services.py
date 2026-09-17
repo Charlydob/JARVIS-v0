@@ -122,6 +122,9 @@ class JarvisServices:
         self.ollama = OllamaService(settings)
         self.stt = SpeechToTextService(settings)
         self.tts = TextToSpeechService(settings)
+        self._location_cache: dict[tuple[float, float], str] = {}
+        self._geocode_lock = asyncio.Lock()
+        self._last_geocode_at = 0.0
 
     async def status(self) -> dict[str, Any]:
         return {
@@ -183,8 +186,11 @@ class JarvisServices:
             "El navegador ha compartido estas coordenadas actuales: "
             f"latitud {float(latitude):.5f}, longitud {float(longitude):.5f}. "
         )
+        place = await self._reverse_location(float(latitude), float(longitude))
+        if place:
+            location_context += f"La geolocalización inversa de OpenStreetMap sitúa al usuario aproximadamente en {place}. "
         if not wants_weather:
-            return location_context + "Comunica las coordenadas con precisión y no inventes el nombre de una ciudad o edificio."
+            return location_context + "Responde con la localidad, región y país disponibles, aclarando que son aproximados."
         params = {
             "latitude": float(latitude),
             "longitude": float(longitude),
@@ -212,3 +218,42 @@ class JarvisServices:
             )
         except (httpx.HTTPError, TypeError, ValueError):
             return "La herramienta meteorológica no está disponible ahora mismo. Dilo claramente y no inventes datos."
+
+    async def _reverse_location(self, latitude: float, longitude: float) -> str | None:
+        cache_key = (round(latitude, 3), round(longitude, 3))
+        if cache_key in self._location_cache:
+            return self._location_cache[cache_key]
+        async with self._geocode_lock:
+            if cache_key in self._location_cache:
+                return self._location_cache[cache_key]
+            loop = asyncio.get_running_loop()
+            wait = 1.0 - (loop.time() - self._last_geocode_at)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(
+                        "https://nominatim.openstreetmap.org/reverse",
+                        params={
+                            "lat": latitude,
+                            "lon": longitude,
+                            "format": "jsonv2",
+                            "addressdetails": 1,
+                            "accept-language": "es",
+                            "zoom": 10,
+                        },
+                        headers={"User-Agent": "JARVIS-v0/0.2 (https://github.com/Charlydob/JARVIS-v0)"},
+                    )
+                    response.raise_for_status()
+                address = response.json().get("address", {})
+                locality = next((address.get(key) for key in ("city", "town", "village", "municipality", "hamlet") if address.get(key)), None)
+                parts = [locality, address.get("state"), address.get("country")]
+                place = ", ".join(dict.fromkeys(str(part) for part in parts if part))
+                if place:
+                    self._location_cache[cache_key] = place
+                    return place
+            except (httpx.HTTPError, TypeError, ValueError):
+                return None
+            finally:
+                self._last_geocode_at = loop.time()
+        return None
