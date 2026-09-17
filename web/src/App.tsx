@@ -237,8 +237,9 @@ export default function App() {
       }
       await runConversation(transcript)
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'No he podido entender el audio')
-      dispatch({ type: 'FAIL' })
+      console.warn('No se pudo transcribir la grabación', error)
+      setNotice('No he podido entenderte. Sigo escuchando.')
+      dispatch({ type: 'EMPTY_AUDIO' })
     }
   }, [runConversation])
 

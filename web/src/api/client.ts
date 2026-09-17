@@ -39,8 +39,13 @@ async function timedFetch(input: string, init: RequestInit = {}, timeoutMs = 90_
 
 async function checked(response: Response): Promise<Response> {
   if (response.ok) return response
-  const body = await response.json().catch(() => ({ detail: `HTTP ${response.status}` })) as { detail?: string }
-  throw new Error(body.detail || `HTTP ${response.status}`)
+  const raw = await response.text().catch(() => '')
+  let detail = raw.trim()
+  try {
+    const body = JSON.parse(raw) as { detail?: string }
+    detail = body.detail?.trim() || detail
+  } catch { /* retain the plain-text response */ }
+  throw new Error(detail || `HTTP ${response.status}`)
 }
 
 export async function getStatus(): Promise<StatusResponse> {
@@ -59,7 +64,10 @@ export async function sendMessage(message: string, conversationId?: string, loca
 
 export async function transcribeAudio(audio: Blob): Promise<string> {
   const form = new FormData()
-  form.append('file', audio, 'utterance.webm')
+  const extension = audio.type.includes('mp4') || audio.type.includes('m4a') || audio.type.includes('aac')
+    ? 'm4a'
+    : audio.type.includes('ogg') ? 'ogg' : 'webm'
+  form.append('file', audio, `utterance.${extension}`)
   const response = await checked(await timedFetch(`${apiUrl}/api/audio`, { method: 'POST', body: form }))
   const body = await response.json() as { transcript: string }
   return body.transcript.trim()

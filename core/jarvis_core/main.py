@@ -4,6 +4,7 @@ import logging
 import signal
 import socket
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -13,6 +14,17 @@ from jarvis_core.services import JarvisServices
 
 LOGGER = logging.getLogger("jarvis-core")
 INSTANCE_LOCK_PORT = 47651
+
+
+def configure_logging(settings: CoreSettings) -> None:
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    log_path = Path(settings.data_dir) / "core.log"
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    logfile = logging.FileHandler(log_path, encoding="utf-8")
+    logfile.setFormatter(formatter)
+    logging.basicConfig(level=settings.log_level, handlers=[console, logfile], force=True)
 
 
 def acquire_instance_lock() -> socket.socket:
@@ -83,7 +95,7 @@ async def connected_session(settings: CoreSettings, services: JarvisServices) ->
 
 async def run() -> None:
     settings = CoreSettings()
-    logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    configure_logging(settings)
     if settings.core_token == "development-only-change-me" and settings.gateway_ws_url.startswith("wss://"):
         raise RuntimeError("Set a strong JARVIS_CORE_TOKEN before connecting to production")
 

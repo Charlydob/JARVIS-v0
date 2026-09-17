@@ -73,6 +73,7 @@ class SpeechToTextService:
         suffix = (
             ".webm" if "webm" in content_type
             else ".ogg" if "ogg" in content_type
+            else ".m4a" if "mp4" in content_type or "m4a" in content_type or "aac" in content_type
             else ".mp3" if "mpeg" in content_type or "mp3" in content_type
             else ".wav"
         )
