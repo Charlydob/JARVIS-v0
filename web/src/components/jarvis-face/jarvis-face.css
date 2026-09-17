@@ -1,0 +1,49 @@
+.jarvis-face {
+  position: relative;
+  width: min(500px, 88vw);
+  aspect-ratio: 1;
+  color: #fff;
+  cursor: pointer;
+  outline: none;
+}
+
+.jarvis-face:focus-visible {
+  outline: 1px solid #444;
+  outline-offset: 10px;
+  border-radius: 35%;
+}
+
+.jarvis-face-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.jarvis-eye,
+.jarvis-mouth {
+  transform-box: fill-box;
+  transform-origin: center;
+  will-change: transform;
+}
+
+.jarvis-mouth-control {
+  cursor: pointer;
+  outline: none;
+}
+
+.jarvis-face--sleeping {
+  color: #333;
+}
+
+.jarvis-face--muted {
+  color: #777;
+}
+
+.jarvis-face--voice-muted .jarvis-mouth {
+  opacity: 0.3;
+}
+
+.jarvis-face--error {
+  color: #fff;
+}

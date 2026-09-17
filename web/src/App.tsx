@@ -12,7 +12,7 @@ import {
   transcribeAudio
 } from './api/client'
 import type { UserLocation } from './api/client'
-import { JarvisFace } from './components/JarvisFace'
+import { JarvisFace } from './components/jarvis-face/JarvisFace'
 import { useContinuousVoice } from './hooks/useContinuousVoice'
 import { JarvisState, stateLabels, transition } from './state/machine'
 import { takeSpeechSegments } from './speech'
