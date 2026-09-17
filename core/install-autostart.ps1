@@ -6,7 +6,7 @@ if (-not (Test-Path -LiteralPath $python)) {
 }
 $action = New-ScheduledTaskAction -Execute $python -Argument "-m jarvis_core.main" -WorkingDirectory $coreRoot
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$settings = New-ScheduledTaskSettingsSet -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+$settings = New-ScheduledTaskSettingsSet -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 
 Register-ScheduledTask -TaskName "JARVIS Core" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "Connects the local JARVIS Core to its authenticated gateway" -Force
