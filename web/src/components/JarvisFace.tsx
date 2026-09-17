@@ -8,7 +8,13 @@ export function JarvisFace({ state, voiceEnabled, onClick, onToggleVoice }: { st
         <i className="eye" />
       </span>
       <button className="mouth-button" onClick={(event) => { event.stopPropagation(); onToggleVoice() }} aria-label={voiceEnabled ? 'Silenciar voz de JARVIS' : 'Activar voz de JARVIS'}>
-        <svg className="mouth" viewBox="0 0 160 58" aria-hidden="true"><path d="M 18 16 Q 80 62 142 16" /></svg>
+        <svg className="mouth" viewBox="0 0 160 70" aria-hidden="true">
+          <path className="smile" d="M 18 16 Q 80 62 142 16" />
+          <g className="talking-mouth">
+            <ellipse className="lip" cx="80" cy="36" rx="57" ry="25" />
+            <ellipse className="mouth-cavity" cx="80" cy="36" rx="45" ry="15" />
+          </g>
+        </svg>
       </button>
     </div>
   )

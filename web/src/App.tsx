@@ -16,32 +16,55 @@ import { JarvisState, stateLabels, transition } from './state/machine'
 
 type View = 'face' | 'dashboard'
 
-let speechContext: AudioContext | undefined
+const speechAudio = new Audio()
+speechAudio.preload = 'auto'
+let speechUnlocked = false
 
-function unlockSpeech() {
-  speechContext ??= new AudioContext()
-  void speechContext.resume()
+function resetIOSAudioRoute() {
+  const session = (navigator as Navigator & { audioSession?: { type: string } }).audioSession
+  if (!session) return
+  session.type = 'playback'
+  session.type = 'auto'
 }
 
-async function playAudio(blob: Blob): Promise<void> {
-  if (speechContext) {
-    await speechContext.resume()
-    const buffer = await speechContext.decodeAudioData(await blob.arrayBuffer())
-    await new Promise<void>((resolve) => {
-      const source = speechContext!.createBufferSource()
-      source.buffer = buffer
-      source.connect(speechContext!.destination)
-      source.onended = () => resolve()
-      source.start()
-    })
-    return
-  }
+function silentWav(): Blob {
+  const sampleRate = 8000
+  const samples = 800
+  const buffer = new ArrayBuffer(44 + samples)
+  const view = new DataView(buffer)
+  const write = (offset: number, value: string) => [...value].forEach((letter, index) => view.setUint8(offset + index, letter.charCodeAt(0)))
+  write(0, 'RIFF'); view.setUint32(4, 36 + samples, true); write(8, 'WAVE'); write(12, 'fmt ')
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true)
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate, true); view.setUint16(32, 1, true); view.setUint16(34, 8, true)
+  write(36, 'data'); view.setUint32(40, samples, true)
+  for (let index = 44; index < 44 + samples; index += 1) view.setUint8(index, 128)
+  return new Blob([buffer], { type: 'audio/wav' })
+}
+
+function unlockSpeech(force = false) {
+  if (speechUnlocked && !force) return
+  const url = URL.createObjectURL(silentWav())
+  speechAudio.src = url
+  speechAudio.volume = 0.01
+  void speechAudio.play().then(() => {
+    speechAudio.pause()
+    speechAudio.currentTime = 0
+    speechAudio.volume = 1
+    speechUnlocked = true
+    URL.revokeObjectURL(url)
+  }).catch(() => URL.revokeObjectURL(url))
+}
+
+function playAudio(blob: Blob): Promise<void> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(blob)
-    const audio = new Audio(url)
-    audio.onended = () => { URL.revokeObjectURL(url); resolve() }
-    audio.onerror = () => { URL.revokeObjectURL(url); reject(new Error('No se pudo reproducir la voz')) }
-    audio.play().catch((error) => { URL.revokeObjectURL(url); reject(error) })
+    resetIOSAudioRoute()
+    speechAudio.pause()
+    speechAudio.src = url
+    speechAudio.volume = 1
+    speechAudio.onended = () => { URL.revokeObjectURL(url); resolve() }
+    speechAudio.onerror = () => { speechUnlocked = false; URL.revokeObjectURL(url); reject(new Error('No se pudo reproducir la voz')) }
+    speechAudio.play().catch((error) => { speechUnlocked = false; URL.revokeObjectURL(url); reject(error) })
   })
 }
 
@@ -154,7 +177,7 @@ export default function App() {
 
   const toggleSound = () => {
     const next = !soundEnabled
-    if (next) unlockSpeech()
+    if (next) unlockSpeech(true)
     setSoundEnabled(next)
     localStorage.setItem('jarvis-sound', String(next))
   }

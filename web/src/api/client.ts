@@ -24,6 +24,19 @@ export interface HistoryItem {
 
 const apiUrl = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 
+async function timedFetch(input: string, init: RequestInit = {}, timeoutMs = 90_000): Promise<Response> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw new Error('JARVIS ha tardado demasiado. Toca la cara para reintentar.')
+    throw error
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
 async function checked(response: Response): Promise<Response> {
   if (response.ok) return response
   const body = await response.json().catch(() => ({ detail: `HTTP ${response.status}` })) as { detail?: string }
@@ -37,7 +50,7 @@ export async function getStatus(): Promise<StatusResponse> {
 export interface UserLocation { latitude: number; longitude: number }
 
 export async function sendMessage(message: string, conversationId?: string, location?: UserLocation): Promise<ChatResponse> {
-  return (await checked(await fetch(`${apiUrl}/api/chat`, {
+  return (await checked(await timedFetch(`${apiUrl}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, conversation_id: conversationId, ...location })
@@ -47,17 +60,17 @@ export async function sendMessage(message: string, conversationId?: string, loca
 export async function transcribeAudio(audio: Blob): Promise<string> {
   const form = new FormData()
   form.append('file', audio, 'utterance.webm')
-  const response = await checked(await fetch(`${apiUrl}/api/audio`, { method: 'POST', body: form }))
+  const response = await checked(await timedFetch(`${apiUrl}/api/audio`, { method: 'POST', body: form }))
   const body = await response.json() as { transcript: string }
   return body.transcript.trim()
 }
 
 export async function synthesizeSpeech(text: string): Promise<Blob> {
-  const response = await checked(await fetch(`${apiUrl}/api/tts`, {
+  const response = await checked(await timedFetch(`${apiUrl}/api/tts`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message: text })
-  }))
+  }, 45_000))
   return response.blob()
 }
 

@@ -22,6 +22,7 @@ Un saludo se responde con brevedad, sin añadir noticias, clima ni supuestos.
 Si necesitas información actual y no aparece en un contexto de herramienta, di claramente que no dispones de ella."""
 
 WEATHER_WORDS = ("tiempo", "clima", "lluv", "temperatura", "frío", "frio", "calor", "nubl", "pronóstico", "pronostico", "previsión", "prevision")
+LOCATION_WORDS = ("dónde estamos", "donde estamos", "dónde estoy", "donde estoy", "ubicación", "ubicacion", "localización", "localizacion")
 
 
 class OllamaService:
@@ -33,8 +34,14 @@ class OllamaService:
         system_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         if context:
             system_messages.append({"role": "system", "content": context})
-        payload = {"model": self.model, "messages": [*system_messages, *messages], "stream": False}
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        payload = {
+            "model": self.model,
+            "messages": [*system_messages, *messages],
+            "stream": False,
+            "keep_alive": "10m",
+            "options": {"temperature": 0.35, "num_predict": 220},
+        }
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=5.0)) as client:
             response = await client.post(f"{self.base_url}/api/chat", json=payload)
             response.raise_for_status()
             data = response.json()
@@ -80,7 +87,16 @@ class SpeechToTextService:
             path.unlink(missing_ok=True)
 
     def _transcribe_file(self, path: Path) -> str:
-        segments, _ = self._load().transcribe(str(path), language="es", vad_filter=True, beam_size=5)
+        segments, _ = self._load().transcribe(
+            str(path),
+            language="es",
+            beam_size=5,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            initial_prompt="Conversación clara en español con un asistente llamado JARVIS.",
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 450},
+        )
         return " ".join(segment.text.strip() for segment in segments).strip()
 
 
@@ -144,9 +160,9 @@ class JarvisServices:
         message = str(payload["message"]).strip()
         conversation_id = str(payload.get("conversation_id") or uuid4())
         previous = self.storage.conversation(conversation_id, limit=20)
-        self.storage.add_message(conversation_id, "user", message)
-        context = await self._weather_context(message, payload.get("latitude"), payload.get("longitude"))
+        context = await self._tool_context(message, payload.get("latitude"), payload.get("longitude"))
         answer = await self.ollama.chat([*previous, {"role": "user", "content": message}], context)
+        self.storage.add_message(conversation_id, "user", message)
         message_id = self.storage.add_message(conversation_id, "assistant", answer)
         return {
             "message": answer,
@@ -155,11 +171,20 @@ class JarvisServices:
             "message_id": message_id,
         }
 
-    async def _weather_context(self, message: str, latitude: Any, longitude: Any) -> str | None:
-        if not any(word in message.lower() for word in WEATHER_WORDS):
+    async def _tool_context(self, message: str, latitude: Any, longitude: Any) -> str | None:
+        normalized = message.lower()
+        wants_weather = any(word in normalized for word in WEATHER_WORDS)
+        wants_location = any(word in normalized for word in LOCATION_WORDS)
+        if not wants_weather and not wants_location:
             return None
         if latitude is None or longitude is None:
-            return "El usuario pregunta por meteorología, pero no ha compartido ubicación. Pídele una ubicación; no hagas ninguna estimación."
+            return "La petición requiere ubicación, pero el navegador no la ha compartido. Dilo claramente y pide permiso o una ubicación escrita; no adivines."
+        location_context = (
+            "El navegador ha compartido estas coordenadas actuales: "
+            f"latitud {float(latitude):.5f}, longitud {float(longitude):.5f}. "
+        )
+        if not wants_weather:
+            return location_context + "Comunica las coordenadas con precisión y no inventes el nombre de una ciudad o edificio."
         params = {
             "latitude": float(latitude),
             "longitude": float(longitude),
@@ -177,7 +202,7 @@ class JarvisServices:
             probabilities = data.get("hourly", {}).get("precipitation_probability", [])
             maximum_rain = max((value for value in probabilities if value is not None), default=None)
             return (
-                "Datos meteorológicos actuales obtenidos por herramienta para las coordenadas autorizadas "
+                location_context + "Datos meteorológicos actuales obtenidos por herramienta para esas coordenadas "
                 f"({float(latitude):.3f}, {float(longitude):.3f}), zona {data.get('timezone', 'desconocida')}: "
                 f"temperatura {current.get('temperature_2m')} °C, sensación {current.get('apparent_temperature')} °C, "
                 f"precipitación {current.get('precipitation')} mm, lluvia {current.get('rain')} mm, "
