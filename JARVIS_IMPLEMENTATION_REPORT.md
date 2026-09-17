@@ -157,3 +157,64 @@ npm --prefix web run build
 ```powershell
 ssh -i C:\Users\carlo\.ssh\hetzner_ed25519 root@46.224.61.193 "cd /opt/jarvis; git rev-parse HEAD; docker compose ps; curl -sS http://127.0.0.1:8088/api/status"
 ```
+
+## Regression fixes and feedback UX
+
+### Causas confirmadas
+
+- Escucha: los logs reales mostraban `av.error.InvalidDataError` en varias capturas WebM. La PWA conservaba la cabecera pero eliminaba fragmentos intermedios del contenedor para formar el preroll; ciertos WebM/MP4 resultantes no eran decodificables por Whisper.
+- Permisos: el hook detenía el track cada vez que cambiaba su ciclo de vida (cambio de vista, error o caída breve del Core), por lo que el navegador podía volver a solicitar acceso.
+- Idioma: la instrucción enviada a Ollama era débil y estaba redactada en español; además, durante streaming el frontend forzaba al TTS el idioma de entrada, aunque el texto generado fuese de otro idioma.
+- Boca: la clase visual `speaking` empezaba con el primer fragmento de texto, antes de que el MP3 estuviera sintetizado y reproduciéndose.
+- Ojos desktop: la animación de escucha usaba solo escalado sutil. En pantallas grandes el movimiento era prácticamente imperceptible, aunque en móvil sí se apreciaba.
+
+### Solución aplicada
+
+- Feedback rápido persistente en la esquina superior izquierda de la cara. La galleta valora la última respuesta como positiva; el látigo abre el diálogo existente de motivo y corrección. La selección guardada queda marcada y el historial conserva sus controles por respuesta.
+- Nuevo `GET /api/stats`, alimentado directamente por SQLite, con totales reales de mensajes, positivos y negativos. El dashboard los presenta junto al historial y los actualiza después de cada respuesta/valoración.
+- Ollama recibe una obligación explícita de idioma con nombre y código. El texto manual también se detecta en el Core. El TTS detecta el idioma del texto generado y usa el idioma de entrada solo como fallback.
+- La grabación conserva todos los fragmentos de cada contenedor. Los periodos sin voz rotan cada 15 segundos para acotar memoria sin cortar el interior de WebM/MP4. Se mantienen los umbrales de VAD existentes: no se subió sensibilidad sin evidencia.
+- Telemetría añadida: consola web con motivo de parada/descarte, duración, voz estimada, bytes, MIME, RMS máximo y threshold; Core con bytes recibidos, duración declarada, idioma/probabilidad de Whisper, duración decodificada/VAD y transcripción o descarte vacío.
+- El stream de micrófono se reutiliza durante la sesión de página frente a cambios temporales de vista/Core. Solo se libera al abandonar la página. El permiso persistente entre cierres/reinstalaciones sigue dependiendo de Safari/iOS y de los ajustes del sitio/PWA; la aplicación no puede concederlo ni conservarlo contra la política del sistema.
+- La boca usa ahora un estado separado de reproducción: se abre únicamente después de que `HTMLAudioElement.play()` arranca y se cierra en `ended`/error. La síntesis y el streaming de texto no la mueven.
+- Se añadieron keyframes solo para desktop (`min-width: 641px`) con traslación visible de ojos; los keyframes móviles no se tocaron. `prefers-reduced-motion` continúa respetándose.
+
+### Archivos principales
+
+- `web/src/App.tsx`
+- `web/src/api/client.ts`
+- `web/src/components/JarvisFace.tsx`
+- `web/src/hooks/useContinuousVoice.ts`
+- `web/src/styles.css`
+- `backend/app/main.py`
+- `core/jarvis_core/services.py`
+- `core/jarvis_core/storage.py`
+- `backend/tests/test_api.py`
+- `core/tests/test_storage.py`
+- `core/tests/test_streaming.py`
+
+### Pruebas
+
+- Gateway: `10 passed`.
+- Core: `8 passed`.
+- Web/Vitest: `4 passed`.
+- ESLint: correcto.
+- TypeScript + Vite + PWA build: correcto.
+- Prueba real de Ollama: entrada inglesa produjo una respuesta íntegramente inglesa; entrada española produjo una respuesta íntegramente española.
+- Base SQLite real leída sin modificar: `92 mensajes`, `1 positivo`, `0 negativos` en el momento de la prueba.
+- Verificación visual desktop: feedback global visible y accesible; dashboard con los tres contadores persistentes.
+- GitHub Actions `35220858532`: `Deploy JARVIS` completado con éxito. Hetzner quedó en `23b9d6bb20a84961300d31b56ab356b7c0d9ddf8`, con gateway/web saludables, Core conectado y `/api/stats` operativo.
+
+### Límites y pasos manuales
+
+- Tras el despliegue conviene cerrar y volver a abrir la PWA para que iOS active el service worker nuevo.
+- iOS puede volver a pedir permiso tras cerrar/reinstalar la PWA, usar navegación privada, revocar permisos o aplicar su propia política de privacidad. Esto no se puede evitar desde JavaScript.
+- Con “Reducir movimiento” activado en el sistema, las animaciones se reducen deliberadamente por accesibilidad.
+- La captura móvil real debe confirmarse hablando varias veces desde el iPhone; los nuevos logs permiten distinguir un descarte VAD, un contenedor inválido y una transcripción vacía.
+
+### Commit y estado Git
+
+- Implementación: `23b9d6bb20a84961300d31b56ab356b7c0d9ddf8` (`fix: harden voice capture and feedback UX`).
+- Rama: `main`.
+- El commit documental que contiene esta sección es el `HEAD` posterior inmediato.
+- Antes de añadir esta sección, el árbol estaba limpio y `origin/main` contenía el commit de implementación.
