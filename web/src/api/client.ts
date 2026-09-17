@@ -68,11 +68,11 @@ export async function getStatus(): Promise<StatusResponse> {
 
 export interface UserLocation { latitude: number; longitude: number }
 
-export async function sendMessage(message: string, conversationId?: string, location?: UserLocation, language?: string): Promise<ChatResponse> {
+export async function sendMessage(message: string, conversationId?: string, location?: UserLocation, language?: string, languageConfidence?: number): Promise<ChatResponse> {
   return (await checked(await timedFetch(`${apiUrl}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, conversation_id: conversationId, ...location, language })
+    body: JSON.stringify({ message, conversation_id: conversationId, ...location, language, language_confidence: languageConfidence })
   }))).json() as Promise<ChatResponse>
 }
 
@@ -81,12 +81,13 @@ export async function streamMessage(
   conversationId: string | undefined,
   location: UserLocation | undefined,
   language: string | undefined,
+  languageConfidence: number | undefined,
   onChunk: (chunk: string) => void
 ): Promise<ChatResponse> {
   const response = await checked(await timedFetch(`${apiUrl}/api/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, conversation_id: conversationId, ...location, language })
+    body: JSON.stringify({ message, conversation_id: conversationId, ...location, language, language_confidence: languageConfidence })
   }, 180_000))
   if (!response.body) throw new Error('El navegador no admite respuestas en streaming.')
 
@@ -117,7 +118,7 @@ export async function streamMessage(
   return result
 }
 
-export async function transcribeAudio(audio: Blob, metadata?: AudioCaptureMetadata): Promise<{ transcript: string; language?: string }> {
+export async function transcribeAudio(audio: Blob, metadata?: AudioCaptureMetadata): Promise<{ transcript: string; language?: string; languageConfidence?: number }> {
   const form = new FormData()
   const extension = audio.type.includes('mp4') || audio.type.includes('m4a') || audio.type.includes('aac')
     ? 'm4a'
@@ -128,8 +129,8 @@ export async function transcribeAudio(audio: Blob, metadata?: AudioCaptureMetada
     form.append('speech_ms', String(Math.round(metadata.speechMs)))
   }
   const response = await checked(await timedFetch(`${apiUrl}/api/audio`, { method: 'POST', body: form }))
-  const body = await response.json() as { transcript: string; language?: string }
-  return { transcript: body.transcript.trim(), language: body.language }
+  const body = await response.json() as { transcript: string; language?: string; language_confidence?: number }
+  return { transcript: body.transcript.trim(), language: body.language, languageConfidence: body.language_confidence }
 }
 
 export async function synthesizeSpeech(text: string, language?: string): Promise<Blob> {

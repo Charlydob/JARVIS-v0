@@ -2,7 +2,7 @@ import type { FaceElements, StopAnimation } from './types'
 import { prefersReducedMotion } from './types'
 
 export function startIdleAnimation(
-  { leftEye, rightEye, mouth }: FaceElements
+  { svg, leftEye, rightEye, mouth }: FaceElements
 ): StopAnimation {
   if (prefersReducedMotion()) return () => {}
 
@@ -42,9 +42,20 @@ export function startIdleAnimation(
     }
   )
 
+  const drift = svg.animate(
+    [
+      { transform: 'translate3d(-22px, 5px, 0) rotate(-.6deg)' },
+      { transform: 'translate3d(26px, -10px, 0) rotate(.55deg)', offset: .36 },
+      { transform: 'translate3d(8px, 8px, 0) rotate(.15deg)', offset: .7 },
+      { transform: 'translate3d(-22px, 5px, 0) rotate(-.6deg)' }
+    ],
+    { duration: 9000, iterations: Infinity, easing: 'cubic-bezier(.45,0,.55,1)' }
+  )
+
   return () => {
     left.cancel()
     right.cancel()
     mouthAnimation.cancel()
+    drift.cancel()
   }
 }

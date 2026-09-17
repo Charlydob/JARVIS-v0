@@ -114,6 +114,7 @@ export default function App() {
   const [correction, setCorrection] = useState('')
   const [feedbackReason, setFeedbackReason] = useState('incorrect')
   const conversationId = useRef<string>()
+  const sessionLanguage = useRef('es')
   const noticeRef = useRef<HTMLParagraphElement>(null)
   const onlineRef = useRef(false)
   const statusCheckedRef = useRef(false)
@@ -203,7 +204,7 @@ export default function App() {
     if (noticeRef.current) noticeRef.current.scrollTop = noticeRef.current.scrollHeight
   }, [notice])
 
-  const runConversation = useCallback(async (message: string, language?: string) => {
+  const runConversation = useCallback(async (message: string, language?: string, languageConfidence?: number) => {
     const cleanMessage = message.trim()
     if (!cleanMessage || !coreOnline) return
     dispatch({ type: 'SUBMIT' })
@@ -214,8 +215,9 @@ export default function App() {
       let speechBuffer = ''
       let responseStarted = false
       let speechFailed = false
+      const speechLanguage = sessionLanguage.current
       const speechQueue = new PrefetchedSpeechQueue<Blob>({
-        synthesize: (text) => synthesizeSpeech(text, language),
+        synthesize: (text) => synthesizeSpeech(text, speechLanguage),
         play: (speech) => playAudio(speech, setAudioPlaying),
         onError: () => { speechFailed = true },
       })
@@ -227,7 +229,7 @@ export default function App() {
         for (const segment of split.segments) speechQueue.enqueue(segment)
       }
 
-      const response = await streamMessage(cleanMessage, conversationId.current, location, language, (chunk) => {
+      const response = await streamMessage(cleanMessage, conversationId.current, location, language, languageConfidence, (chunk) => {
         fullText += chunk
         setNotice(fullText)
         if (!responseStarted) {
@@ -240,6 +242,7 @@ export default function App() {
         }
       })
       conversationId.current = response.conversation_id
+      sessionLanguage.current = response.language || sessionLanguage.current
       setLatestResponse({ id: response.message_id, rating: null })
       fullText = response.message || fullText
       setNotice(fullText)
@@ -293,7 +296,7 @@ export default function App() {
         dispatch({ type: 'EMPTY_AUDIO' })
         return
       }
-      await runConversation(transcription.transcript, transcription.language)
+      await runConversation(transcription.transcript, transcription.language, transcription.languageConfidence)
     } catch (error) {
       console.warn('No se pudo transcribir la grabación', error)
       setNotice('No he podido entenderte. Sigo escuchando.')
