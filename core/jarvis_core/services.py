@@ -14,7 +14,14 @@ from jarvis_core.config import CoreSettings
 from jarvis_core.storage import Storage
 
 
-SYSTEM_PROMPT = "Eres JARVIS, un asistente personal preciso, discreto y útil. Responde en español salvo que el usuario pida otro idioma."
+SYSTEM_PROMPT = """Eres JARVIS, un asistente personal preciso, discreto y útil.
+Responde en español salvo que el usuario pida otro idioma y dirígete a él como «señor» cuando resulte natural.
+No inventes nunca hechos, ubicación, clima, agenda, vivienda, familia, posesiones ni acciones realizadas.
+No menciones mansiones, desayunos ni detalles personales que el usuario no haya proporcionado.
+Un saludo se responde con brevedad, sin añadir noticias, clima ni supuestos.
+Si necesitas información actual y no aparece en un contexto de herramienta, di claramente que no dispones de ella."""
+
+WEATHER_WORDS = ("tiempo", "clima", "lluv", "temperatura", "frío", "frio", "calor", "nubl", "pronóstico", "pronostico", "previsión", "prevision")
 
 
 class OllamaService:
@@ -22,8 +29,11 @@ class OllamaService:
         self.base_url = settings.ollama_url.rstrip("/")
         self.model = settings.ollama_model
 
-    async def chat(self, messages: list[dict[str, str]]) -> str:
-        payload = {"model": self.model, "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *messages], "stream": False}
+    async def chat(self, messages: list[dict[str, str]], context: str | None = None) -> str:
+        system_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if context:
+            system_messages.append({"role": "system", "content": context})
+        payload = {"model": self.model, "messages": [*system_messages, *messages], "stream": False}
         async with httpx.AsyncClient(timeout=180.0) as client:
             response = await client.post(f"{self.base_url}/api/chat", json=payload)
             response.raise_for_status()
@@ -135,7 +145,8 @@ class JarvisServices:
         conversation_id = str(payload.get("conversation_id") or uuid4())
         previous = self.storage.conversation(conversation_id, limit=20)
         self.storage.add_message(conversation_id, "user", message)
-        answer = await self.ollama.chat([*previous, {"role": "user", "content": message}])
+        context = await self._weather_context(message, payload.get("latitude"), payload.get("longitude"))
+        answer = await self.ollama.chat([*previous, {"role": "user", "content": message}], context)
         message_id = self.storage.add_message(conversation_id, "assistant", answer)
         return {
             "message": answer,
@@ -143,3 +154,36 @@ class JarvisServices:
             "conversation_id": conversation_id,
             "message_id": message_id,
         }
+
+    async def _weather_context(self, message: str, latitude: Any, longitude: Any) -> str | None:
+        if not any(word in message.lower() for word in WEATHER_WORDS):
+            return None
+        if latitude is None or longitude is None:
+            return "El usuario pregunta por meteorología, pero no ha compartido ubicación. Pídele una ubicación; no hagas ninguna estimación."
+        params = {
+            "latitude": float(latitude),
+            "longitude": float(longitude),
+            "current": "temperature_2m,apparent_temperature,precipitation,rain,weather_code,cloud_cover",
+            "hourly": "precipitation_probability",
+            "forecast_hours": 12,
+            "timezone": "auto",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
+                response.raise_for_status()
+            data = response.json()
+            current = data.get("current", {})
+            probabilities = data.get("hourly", {}).get("precipitation_probability", [])
+            maximum_rain = max((value for value in probabilities if value is not None), default=None)
+            return (
+                "Datos meteorológicos actuales obtenidos por herramienta para las coordenadas autorizadas "
+                f"({float(latitude):.3f}, {float(longitude):.3f}), zona {data.get('timezone', 'desconocida')}: "
+                f"temperatura {current.get('temperature_2m')} °C, sensación {current.get('apparent_temperature')} °C, "
+                f"precipitación {current.get('precipitation')} mm, lluvia {current.get('rain')} mm, "
+                f"nubosidad {current.get('cloud_cover')} %, código WMO {current.get('weather_code')}, "
+                f"máxima probabilidad de precipitación próximas 12 h {maximum_rain} %. "
+                "Usa solo estos datos para contestar sobre el tiempo y aclara que son una previsión."
+            )
+        except (httpx.HTTPError, TypeError, ValueError):
+            return "La herramienta meteorológica no está disponible ahora mismo. Dilo claramente y no inventes datos."

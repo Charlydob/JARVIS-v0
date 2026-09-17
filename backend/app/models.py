@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field, model_validator
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=16_000)
     conversation_id: str | None = None
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
 
 
 class ChatResponse(BaseModel):

@@ -34,11 +34,13 @@ export async function getStatus(): Promise<StatusResponse> {
   return (await checked(await fetch(`${apiUrl}/api/status`, { cache: 'no-store' }))).json() as Promise<StatusResponse>
 }
 
-export async function sendMessage(message: string, conversationId?: string): Promise<ChatResponse> {
+export interface UserLocation { latitude: number; longitude: number }
+
+export async function sendMessage(message: string, conversationId?: string, location?: UserLocation): Promise<ChatResponse> {
   return (await checked(await fetch(`${apiUrl}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, conversation_id: conversationId })
+    body: JSON.stringify({ message, conversation_id: conversationId, ...location })
   }))).json() as Promise<ChatResponse>
 }
 

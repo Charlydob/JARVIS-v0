@@ -9,13 +9,33 @@ import {
   synthesizeSpeech,
   transcribeAudio
 } from './api/client'
+import type { UserLocation } from './api/client'
 import { JarvisFace } from './components/JarvisFace'
 import { useContinuousVoice } from './hooks/useContinuousVoice'
 import { JarvisState, stateLabels, transition } from './state/machine'
 
 type View = 'face' | 'dashboard'
 
-function playAudio(blob: Blob): Promise<void> {
+let speechContext: AudioContext | undefined
+
+function unlockSpeech() {
+  speechContext ??= new AudioContext()
+  void speechContext.resume()
+}
+
+async function playAudio(blob: Blob): Promise<void> {
+  if (speechContext) {
+    await speechContext.resume()
+    const buffer = await speechContext.decodeAudioData(await blob.arrayBuffer())
+    await new Promise<void>((resolve) => {
+      const source = speechContext!.createBufferSource()
+      source.buffer = buffer
+      source.connect(speechContext!.destination)
+      source.onended = () => resolve()
+      source.start()
+    })
+    return
+  }
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(blob)
     const audio = new Audio(url)
@@ -31,6 +51,7 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [muted, setMuted] = useState(() => localStorage.getItem('jarvis-muted') === 'true')
   const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem('jarvis-sound') !== 'false')
+  const [location, setLocation] = useState<UserLocation>()
   const [coreOnline, setCoreOnline] = useState(false)
   const [notice, setNotice] = useState('Conectando con el Core…')
   const [input, setInput] = useState('')
@@ -42,6 +63,17 @@ export default function App() {
   const onlineRef = useRef(false)
   const statusCheckedRef = useRef(false)
   const busy = state === 'thinking' || state === 'speaking'
+
+  useEffect(() => {
+    const unlock = () => unlockSpeech()
+    window.addEventListener('pointerdown', unlock, { once: true, capture: true })
+    navigator.geolocation?.getCurrentPosition(
+      ({ coords }) => setLocation({ latitude: coords.latitude, longitude: coords.longitude }),
+      () => undefined,
+      { enableHighAccuracy: false, maximumAge: 15 * 60 * 1000, timeout: 8000 }
+    )
+    return () => window.removeEventListener('pointerdown', unlock, { capture: true })
+  }, [])
 
   const refreshHistory = useCallback(async () => {
     if (!coreOnline) return
@@ -100,7 +132,7 @@ export default function App() {
     dispatch({ type: 'SUBMIT' })
     setNotice(cleanMessage)
     try {
-      const response = await sendMessage(cleanMessage, conversationId.current)
+      const response = await sendMessage(cleanMessage, conversationId.current, location)
       conversationId.current = response.conversation_id
       setNotice(response.message)
       dispatch({ type: 'RESPONSE' })
@@ -118,7 +150,14 @@ export default function App() {
       setNotice(error instanceof Error ? error.message : 'No he podido completar la solicitud')
       dispatch({ type: 'FAIL' })
     }
-  }, [coreOnline, muted, refreshHistory, soundEnabled])
+  }, [coreOnline, location, muted, refreshHistory, soundEnabled])
+
+  const toggleSound = () => {
+    const next = !soundEnabled
+    if (next) unlockSpeech()
+    setSoundEnabled(next)
+    localStorage.setItem('jarvis-sound', String(next))
+  }
 
   const processAudio = useCallback(async (audio: Blob) => {
     dispatch({ type: 'SUBMIT' })
@@ -139,7 +178,7 @@ export default function App() {
 
   useContinuousVoice({
     enabled: coreOnline && !muted && !busy && view === 'face' && state !== 'error',
-    onListening: useCallback(() => dispatch({ type: 'START_LISTENING' }), []),
+    onListening: useCallback(() => { unlockSpeech(); dispatch({ type: 'START_LISTENING' }) }, []),
     onUtterance: useCallback((audio) => { void processAudio(audio) }, [processAudio]),
     onError: useCallback((message) => { setNotice(message); dispatch({ type: 'FAIL' }) }, [])
   })
@@ -237,14 +276,14 @@ export default function App() {
       {menuOpen && (
         <nav className="menu">
           <button onClick={() => { setView('dashboard'); setMenuOpen(false) }}><History size={18} /> Historial</button>
-          <button onClick={() => { const next = !soundEnabled; setSoundEnabled(next); localStorage.setItem('jarvis-sound', String(next)) }}>
+          <button onClick={toggleSound}>
             {soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />} Voz {soundEnabled ? 'activada' : 'desactivada'}
           </button>
         </nav>
       )}
 
       <section className="presence">
-        <JarvisFace state={state} onClick={toggleMute} />
+        <JarvisFace state={state} voiceEnabled={soundEnabled} onClick={toggleMute} onToggleVoice={toggleSound} />
         <p className="state-label">{stateLabels[state]}</p>
         <p className="notice">{notice}</p>
       </section>
