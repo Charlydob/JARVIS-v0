@@ -262,13 +262,7 @@ export async function runThinkingAnimation(
       lerp(idle.mouth.ry, target.mouth.r, t)
     )
 
-    mouth.setAttribute(
-      'transform',
-      `rotate(${180 * t} ${mouthPosition.x} ${mouthPosition.y})`
-    )
   })
-
-  mouth.removeAttribute('transform')
 
   if (signal.aborted) {
     await returnToIdle(elements, idle)
