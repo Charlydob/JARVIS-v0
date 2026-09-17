@@ -343,3 +343,63 @@ ssh -i C:\Users\carlo\.ssh\hetzner_ed25519 root@46.224.61.193 "cd /opt/jarvis; g
 ### Git status
 
 - Rama `main`; árbol limpio antes de añadir esta sección documental.
+
+## Language stability + latency + tool reliability
+
+### Causas raíz
+
+- Idioma: cada turno aceptaba directamente el idioma indicado por Whisper o `langdetect`; no existía un idioma persistente por conversación ni un umbral que protegiera palabras cortas, transcripciones ruidosas o detecciones inesperadas.
+- Tools: cuando el router no encontraba un dominio devolvía las 17 definiciones. Además, el resultado de una tool se entregaba al modelo sin bloquear de forma determinista una confirmación falsa si la ejecución fallaba o pedía aclaración.
+- Latencia: una conversación normal cargaba todas las tools; el feedback podía provocar una inferencia adicional aunque no hubiera similitud; se enviaban 20 mensajes históricos y consultas evidentes de Books/Reminders pagaban una ronda de Ollama solo para elegir una tool inequívoca.
+- Animación: el estado `listening` nuevo sustituía el movimiento relajado por ojos azules abiertos, boca plana y asentimientos, eliminando el desplazamiento flotante anterior.
+
+### Solución aplicada
+
+- `SessionLanguagePolicy` mantiene español por defecto y un idioma por `conversation_id`. Las peticiones explícitas cambian al instante; una frase larga y muy clara puede cambiar, mientras que frases medias deben coincidir en dos turnos. Detecciones cortas, débiles, no soportadas o aisladas mantienen el idioma actual. La probabilidad real de Whisper llega ahora desde `/api/audio` hasta el Core.
+- El idioma devuelto por Core es el idioma de sesión validado. La PWA conserva ese idioma para TTS y el sintetizador comprueba el texto real con fallback estable para segmentos breves.
+- El router ligero devuelve 0 tools para conversación normal y como máximo 3 por dominio. Las lecturas inequívocas “página actual” y “recordatorios de hoy” se ejecutan directamente, sin una inferencia de selección; las escrituras y peticiones ambiguas siguen pasando por tool calling.
+- Los logs incluyen `tool_requested`, `tool_executed`, `tool_success` y `tool_error`. Un fallo, configuración incompleta o aclaración se devuelve directamente y nunca pasa por una redacción capaz de fingir éxito. Un recordatorio sin hora responde `¿A qué hora, señor?` y no llama a BookShell.
+- Se añadieron tiempos estructurados para STT, contexto externo, feedback, selección de tools, decisión de tools, primer token y total de Ollama, ejecución de tool, primer audio TTS y total del chat.
+- El historial enviado bajó de 20 a 8 mensajes; el feedback irrelevante toma una salida léxica rápida; contexto externo y feedback se preparan en paralelo; Ollama conserva `keep_alive=10m`.
+- Las respuestas son breves por defecto mediante la instrucción de sistema, sin limitar artificialmente respuestas largas solicitadas.
+- `idle` y `listening` vuelven a compartir ojos blancos suaves, parpadeo/respiración y deriva lenta de lado a lado basada en la animación anterior. No se modificó el SVG.
+
+### Timings antes/después
+
+Medidos contra el mismo Ollama local calentado, con base SQLite temporal. TTFT y total en milisegundos:
+
+| Escenario | Antes TTFT / total | Después TTFT / total |
+| --- | ---: | ---: |
+| Conversación normal | 25.361 / 26.030 | 0.809 / 1.641 |
+| Books, página actual | 9.172 / 11.015 | 7.200 / 9.309 |
+| Reminders, hoy | 6.098 / 6.901 | 2.564 / 3.360 |
+| Escritura de recordatorio | 17.117 / 20.133 | 16.753 / 19.030 |
+
+La escritura mantiene dos rondas de Ollama porque debe extraer y validar argumentos antes de confirmar. El script reproducible es `scripts/measure_core_latency.py`. En la ruta normal medida, contexto/feedback/routing consumieron menos de 2 ms y el primer token llegó en unos 0,8 s; el coste restante fue Ollama.
+
+### Pruebas y verificación real
+
+- Idioma: secuencia automatizada de 10 turnos ES → ES con palabra inglesa → español ruidoso → EN claro → EN corto → detección portuguesa débil → ES claro; no hubo cambios por señales débiles. También se probaron dos turnos alemanes consistentes y cambio explícito.
+- Recordatorio sin hora: devolvió aclaración y realizó cero peticiones HTTP.
+- Fallo forzado de BookShell: la respuesta fue `No he podido completar esa acción.` y no incluyó “creado”.
+- BookShell real: se creó `Prueba temporal de JARVIS` para `2099-12-31 23:57`, se volvió a consultar con el mismo ID/fecha/hora y luego se canceló. Las dos fixtures generadas por las mediciones quedaron canceladas.
+- Tool routing: conversación normal 0 tools; dominio limitado a 3; Books y Reminders evidentes usan lectura determinista.
+- Animación: `listening.ts` reutiliza `startIdleAnimation`; `idle.ts` contiene la deriva flotante de 9 s y movimiento suave de ojos/boca recuperado del historial.
+- Core: `25 passed`. Gateway: `10 passed`. Web: `6 passed`. ESLint y build TypeScript/Vite/PWA: correctos.
+
+### Archivos modificados
+
+- Core: `language.py`, `services.py`, `tools.py`, `feedback.py`, integración BookShell y pruebas.
+- Gateway/PWA: modelo de confianza de idioma, cliente, `App.tsx`, animaciones `idle`/`listening`.
+- Medición: `scripts/measure_core_latency.py`.
+
+### Commits y estado
+
+- Core/gateway: `53792e0` (`fix: stabilize language tools and latency`).
+- PWA/animación: `6704585` (`fix: restore relaxed listening motion`).
+- Rama `main`; árbol limpio antes de este bloque documental. El commit documental es el siguiente commit.
+
+### Pendiente
+
+- Google Sheets queda expresamente como integración futura. BookShell continúa siendo la fuente principal.
+- La escritura genérica sigue dependiendo de una ronda de selección de Ollama; solo se aceleraron lecturas inequívocas para no introducir ejecuciones incorrectas.
