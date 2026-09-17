@@ -31,7 +31,9 @@ jobs:
           python -m pip install -r backend/requirements-dev.txt
           PYTHONPATH=backend pytest backend/tests -q
       - name: Test Core storage
-        run: PYTHONPATH=core pytest core/tests -q
+        run: |
+          python -m pip install -r core/requirements-dev.txt
+          PYTHONPATH=core pytest core/tests -q
 
   deploy:
     needs: validate
