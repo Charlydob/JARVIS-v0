@@ -244,10 +244,10 @@ export default function App() {
   }, [runConversation])
 
   useContinuousVoice({
-    enabled: coreOnline && !muted && !busy && view === 'face' && state !== 'error',
-    retainMicrophone: coreOnline && !muted && view === 'face' && state !== 'error',
+    enabled: coreOnline && !muted && view === 'face' && state !== 'error',
+    paused: busy,
     onListening: useCallback(() => dispatch({ type: 'START_LISTENING' }), []),
-    onUtterance: useCallback((audio) => { void processAudio(audio) }, [processAudio]),
+    onUtterance: useCallback((audio) => processAudio(audio), [processAudio]),
     onError: useCallback((message) => { setNotice(message); dispatch({ type: 'FAIL' }) }, [])
   })
 
