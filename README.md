@@ -104,7 +104,8 @@ Configura el environment de GitHub `production` y estos secrets:
 | `JARVIS_HOST` | IP o hostname SSH de Hetzner |
 | `JARVIS_USER` | Usuario de despliegue con acceso limitado a `/opt/jarvis` y Docker |
 | `JARVIS_SSH_KEY` | Clave privada dedicada al despliegue |
-| `JARVIS_KNOWN_HOSTS` | Línea verificada de `known_hosts`; evita confiar a ciegas en `ssh-keyscan` durante cada deploy |
+
+La clave pública verificada del host está fijada en `.github/jarvis_known_hosts`; no es un secreto y evita confiar a ciegas en `ssh-keyscan` durante cada deploy.
 
 El token PC↔gateway no es un secret de Actions: vive solo en los dos `.env` de ejecución.
 

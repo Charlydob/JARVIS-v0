@@ -38,14 +38,14 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
+      - uses: actions/checkout@v4
       - name: Configure pinned SSH identity
         env:
           SSH_KEY: ${{ secrets.JARVIS_SSH_KEY }}
-          KNOWN_HOSTS: ${{ secrets.JARVIS_KNOWN_HOSTS }}
         run: |
           install -d -m 700 ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
-          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          cp .github/jarvis_known_hosts ~/.ssh/known_hosts
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
       - name: Deploy only JARVIS services
         env:

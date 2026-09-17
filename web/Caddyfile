@@ -1,11 +1,24 @@
 :80 {
-  @gateway path /api/* /ws /internal/core/ws
-  reverse_proxy @gateway gateway:8000
+  route {
+    handle /api/* {
+      reverse_proxy gateway:8000
+    }
 
-  root * /srv
-  encode zstd gzip
-  try_files {path} /index.html
-  file_server
+    handle /ws {
+      reverse_proxy gateway:8000
+    }
+
+    handle /internal/core/ws {
+      reverse_proxy gateway:8000
+    }
+
+    handle {
+      root * /srv
+      encode zstd gzip
+      try_files {path} /index.html
+      file_server
+    }
+  }
 
   header {
     X-Content-Type-Options "nosniff"
