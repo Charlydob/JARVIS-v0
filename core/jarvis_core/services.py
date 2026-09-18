@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import edge_tts
 import httpx
@@ -52,6 +53,7 @@ AUDIO_MIN_DURATION_MS = 500
 AUDIO_MIN_SPEECH_MS = 300
 AUDIO_MIN_RMS = 0.014
 TRANSCRIPT_REPEAT_WINDOW_S = 8.0
+PENDING_ACTION_TIMEOUT_S = 10 * 60
 NOISE_TRANSCRIPTS = {
     "gracias por ver", "gracias por ver el video", "subtitulos", "musica", "silencio",
     "thank you for watching", "you", "bye",
@@ -60,6 +62,21 @@ NOISE_TRANSCRIPTS = {
 
 def normalized_transcript(value: str) -> str:
     return " ".join(re.findall(r"[^\W_]+", value.casefold(), flags=re.UNICODE))
+
+
+def collapse_repeated_phrases(value: str) -> str:
+    segments = [segment.strip() for segment in re.findall(r"[^.!?]+[.!?]?", value) if segment.strip()]
+    if len(segments) < 2:
+        return value.strip()
+    result: list[str] = []
+    previous = ""
+    for segment in segments:
+        canonical = re.sub(r"\bjarvis\b", "", normalized_transcript(segment)).strip()
+        if canonical == previous and len(canonical.split()) >= 3:
+            continue
+        result.append(segment)
+        previous = canonical
+    return " ".join(result).strip()
 
 
 class OllamaService:
@@ -278,6 +295,10 @@ class JarvisServices:
         self._turn_results: dict[str, tuple[dict[str, Any], float]] = {}
         self._turn_inflight: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._pending_intents: dict[str, DirectIntent] = {}
+        self._pending_intent_created: dict[str, float] = {}
+        self._recent_completed_intents: dict[str, tuple[DirectIntent, float]] = {}
+        self._action_locks: dict[str, asyncio.Lock] = {}
+        self._action_results: dict[str, str] = {}
 
     async def status(self) -> dict[str, Any]:
         return {
@@ -329,6 +350,7 @@ class JarvisServices:
                 self._audio_results[utterance_id] = result
                 return result
             transcript, language, metadata = await self.stt.transcribe(raw, content_type)
+            transcript = collapse_repeated_phrases(transcript)
             LOGGER.info(
                 "Whisper result: language=%s probability=%s decoded_s=%s after_vad_s=%s transcript=%r",
                 language,
@@ -435,12 +457,28 @@ class JarvisServices:
         turn_id = str(payload["turn_id"])
         total_started = time.perf_counter()
         routing_started = time.perf_counter()
-        today = datetime.now().astimezone().date()
-        direct = route_direct_intent(message, today)
+        local_now = datetime.now(ZoneInfo(os.getenv("JARVIS_BOOKSHELL_TIMEZONE", "Europe/Zurich")))
+        today = local_now.date()
+        pending_created = self._pending_intent_created.get(conversation_id)
+        if pending_created is not None and time.monotonic() - pending_created > PENDING_ACTION_TIMEOUT_S:
+            self._pending_intents.pop(conversation_id, None)
+            self._pending_intent_created.pop(conversation_id, None)
+        direct = route_direct_intent(message, today, local_now)
         pending_resumed = False
-        if conversation_id in self._pending_intents and (direct is None or is_pending_followup(message)):
-            direct = continue_direct_intent(self._pending_intents[conversation_id], message, today)
+        if conversation_id in self._pending_intents and (
+            direct is None or (direct.kind == "reminder_create" and is_pending_followup(message))
+        ):
+            direct = continue_direct_intent(self._pending_intents[conversation_id], message, today, local_now)
             pending_resumed = direct is not None
+        elif direct is None and is_pending_followup(message):
+            completed = self._recent_completed_intents.get(conversation_id)
+            if completed and time.monotonic() - completed[1] <= 120:
+                replay = continue_direct_intent(completed[0], message, today, local_now)
+                if replay and replay.arguments and completed[0].arguments and (
+                    replay.arguments.get("target_time") == completed[0].arguments.get("target_time")
+                ):
+                    direct = replay
+                    pending_resumed = True
         routed = direct
         if routed and routed.domain:
             TOOL_LOGGER.info(
@@ -463,27 +501,41 @@ class JarvisServices:
         if direct:
             if direct.clarification:
                 answer = direct.clarification
+                if direct.kind == "reminder_create" and direct.arguments is not None:
+                    direct.arguments.setdefault("idempotency_key", str(uuid4()))
                 self._pending_intents[conversation_id] = direct
+                self._pending_intent_created.setdefault(conversation_id, time.monotonic())
                 TOOL_LOGGER.info(
                     "turn_id=%s route_domain=%s route_operation=%s missing_fields=%s pending_action_created=true",
                     turn_id, direct.domain or "unknown", direct.operation or "unknown",
                     ",".join(direct.missing_fields) or "none",
                 )
             elif direct.tool and direct.arguments is not None:
-                self._pending_intents.pop(conversation_id, None)
                 tool_call_id = str(uuid4())
                 public_tool = "bookshell.reminders.create" if direct.tool == "bookshell_create_reminder" else direct.tool
+                execution_arguments = dict(direct.arguments)
+                action_key = ""
+                if direct.tool == "bookshell_create_reminder":
+                    action_key = str(execution_arguments.setdefault("idempotency_key", turn_id))
                 TOOL_LOGGER.info(
                     "turn_id=%s tool_call_id=%s event=tool_requested tool=%s internal_tool=%s arguments=%s",
-                    turn_id, tool_call_id, public_tool, direct.tool, json.dumps(direct.arguments, ensure_ascii=False),
+                    turn_id, tool_call_id, public_tool, direct.tool, json.dumps(execution_arguments, ensure_ascii=False),
                 )
                 tool_started = time.perf_counter()
                 try:
-                    raw_result = await self.tools.execute(direct.tool, direct.arguments)
+                    if action_key:
+                        action_lock = self._action_locks.setdefault(action_key, asyncio.Lock())
+                        async with action_lock:
+                            raw_result = self._action_results.get(action_key) or await self.tools.execute(direct.tool, execution_arguments)
+                            self._action_results[action_key] = raw_result
+                    else:
+                        raw_result = await self.tools.execute(direct.tool, execution_arguments)
                     parsed = json.loads(raw_result)
                     self._log_tool_timings(turn_id, tool_call_id, parsed)
                     succeeded = self._tool_succeeded(raw_result, direct.tool)
                     verification_succeeded = isinstance(parsed, dict) and parsed.get("verified") is True
+                    if action_key and not succeeded:
+                        self._action_results.pop(action_key, None)
                     TOOL_LOGGER.info(
                         "turn_id=%s tool_call_id=%s event=%s tool=%s internal_tool=%s tool_success=%s verification_success=%s duration_ms=%.1f",
                         turn_id, tool_call_id, "tool_success" if succeeded else "tool_error", public_tool, direct.tool,
@@ -491,7 +543,16 @@ class JarvisServices:
                         (time.perf_counter() - tool_started) * 1000,
                     )
                     answer = render_direct_result(direct.kind, parsed if isinstance(parsed, dict) else {})
+                    if succeeded:
+                        self._pending_intents.pop(conversation_id, None)
+                        self._pending_intent_created.pop(conversation_id, None)
+                        if direct.kind == "reminder_create":
+                            self._recent_completed_intents[conversation_id] = (direct, time.monotonic())
+                        if len(self._action_results) > 200:
+                            self._action_results.pop(next(iter(self._action_results)))
                 except Exception:
+                    if action_key:
+                        self._action_results.pop(action_key, None)
                     TOOL_LOGGER.exception("turn_id=%s tool_call_id=%s event=tool_error tool=%s", turn_id, tool_call_id, direct.tool)
                     answer = "No se pudo guardar, señor." if direct.kind in {"book_update", "reminder_create"} else "No he podido consultar BookShell, señor."
                 PERFORMANCE_LOGGER.info(

@@ -101,3 +101,22 @@ def test_world_note_and_recipe_writes_use_existing_data_paths() -> None:
 def test_cancel_reminder_requires_explicit_confirmation() -> None:
     result = asyncio.run(BookShellDomains(FakeClient({})).reminder_update({"reminder_id": "r1", "action": "cancel"}))
     assert result["confirmationRequired"] is True
+
+
+def test_today_reminders_are_fresh_include_overdue_and_exclude_cancelled() -> None:
+    class ReminderClient(FakeClient):
+        request_kwargs: dict[str, Any] = {}
+
+        async def _request(self, _method: str, _path: str, **kwargs: Any) -> dict[str, Any]:
+            self.request_kwargs = kwargs
+            return {"reminders": [
+                {"id": "past", "title": "Clase", "targetTime": "05:30", "status": "pending"},
+                {"id": "future", "title": "Dentista", "targetTime": "17:30", "status": "pending"},
+                {"id": "cancelled", "title": "Borrado", "targetTime": "12:00", "status": "cancelled"},
+            ]}
+
+    client = ReminderClient({})
+    result = asyncio.run(BookShellDomains(client).reminders_query({"scope": "today"}))
+    assert [item["id"] for item in result["items"]] == ["past", "future"]
+    assert client.request_kwargs["headers"]["Cache-Control"] == "no-cache"
+    assert client.request_kwargs["params"]["from"] == client.request_kwargs["params"]["until"]

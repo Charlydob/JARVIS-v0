@@ -209,13 +209,16 @@ class BookShellClient:
             "status": "pending",
         }
         write_started = time.perf_counter()
-        payload = await self._request("POST", "/reminders", json=body)
+        idempotency_key = str(arguments.get("idempotency_key") or "").strip()
+        request_headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        payload = await self._request("POST", "/reminders", json=body, headers=request_headers)
         write_ms = (time.perf_counter() - write_started) * 1000
         reminder = payload.get("reminder") or {}
         reminder_id = str(reminder.get("id") or payload.get("id") or "")
         readback_started = time.perf_counter()
         persisted = await self._request(
-            "GET", "/reminders", params={"from": target_date, "until": target_date, "limit": 100}
+            "GET", "/reminders", params={"from": target_date, "until": target_date, "limit": 100},
+            headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
         )
         readback_ms = (time.perf_counter() - readback_started) * 1000
         saved = next(
@@ -316,6 +319,7 @@ def register_tools(registry: ToolRegistry) -> None:
                 "relative_day": {"type": "string", "enum": ["today", "tomorrow"], "description": "Usar si el usuario dice hoy o mañana"},
                 "target_time": {"type": "string", "description": "Hora HH:MM"},
                 "minutes_before": {"type": "integer", "minimum": 0, "description": "Aviso previo en minutos; 0 si no se pidió antelación"},
+                "idempotency_key": {"type": "string", "description": "Clave interna estable para impedir creaciones duplicadas"},
             },
             "required": ["title"],
         },

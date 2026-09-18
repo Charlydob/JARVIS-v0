@@ -264,8 +264,14 @@ class BookShellDomains:
             params.update({"from": today.isoformat(), "until": today.isoformat()})
         elif scope == "week":
             params.update({"from": today.isoformat(), "until": (today + timedelta(days=7)).isoformat()})
-        payload = await self.client._request("GET", "/reminders", params=params)
-        items = list(payload.get("reminders") or [])
+        payload = await self.client._request(
+            "GET", "/reminders", params=params,
+            headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+        )
+        items = [
+            item for item in list(payload.get("reminders") or [])
+            if str(item.get("status") or "pending").casefold() != "cancelled"
+        ]
         query = _norm(arguments.get("query"))
         person = _norm(arguments.get("person"))
         event_type = _norm(arguments.get("event_type"))

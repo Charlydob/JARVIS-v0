@@ -1,7 +1,7 @@
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time as clock_time, timedelta
 from typing import Any
 
 
@@ -37,24 +37,78 @@ HOUR_WORDS = {
 }
 
 
-def _extract_time(text: str) -> str | None:
+@dataclass(frozen=True)
+class TimeResolution:
+    present: bool
+    value: str | None = None
+    issue: str | None = None
+    candidates: tuple[str, ...] = ()
+
+
+def _resolve_time(text: str, target_date: str | None = None, now: datetime | None = None) -> TimeResolution:
     clock = re.search(r"\ba\s+las?\s+(\d{1,2})(?::(\d{2}))?\b", text)
     if clock:
         hour, minute = int(clock.group(1)), int(clock.group(2) or 0)
     else:
         spoken = re.search(r"\ba\s+las?\s+(" + "|".join(HOUR_WORDS) + r")(?:\s+y\s+(media|cuarto))?\b", text)
         if not spoken:
-            return None
+            return TimeResolution(False)
         hour = HOUR_WORDS[spoken.group(1)]
         minute = 30 if spoken.group(2) == "media" else 15 if spoken.group(2) == "cuarto" else 0
-    return f"{hour:02d}:{minute:02d}" if hour <= 23 and minute <= 59 else None
+    if hour > 23 or minute > 59:
+        return TimeResolution(True, issue="invalid")
+
+    morning = bool(re.search(r"\b(?:de|por)\s+la\s+manana\b|\ba\.?m\.?\b", text))
+    afternoon = bool(re.search(r"\b(?:de|por)\s+la\s+(?:tarde|noche)\b|\bp\.?m\.?\b", text))
+    if hour > 12:
+        hours = [hour]
+    elif morning:
+        hours = [hour % 12]
+    elif afternoon:
+        hours = [(hour % 12) + 12]
+    else:
+        hours = [hour % 12, (hour % 12) + 12]
+    candidates = tuple(dict.fromkeys(f"{candidate:02d}:{minute:02d}" for candidate in hours))
+
+    # Without a target date/current time retain the historic first interpretation;
+    # production routing always supplies both and applies the safety rules below.
+    if not target_date or now is None:
+        return TimeResolution(True, candidates[0], candidates=candidates)
+    try:
+        intended_date = date.fromisoformat(target_date)
+    except ValueError:
+        return TimeResolution(True, issue="invalid", candidates=candidates)
+    if intended_date < now.date():
+        return TimeResolution(True, issue="past", candidates=candidates)
+    if intended_date > now.date():
+        if len(candidates) == 1:
+            return TimeResolution(True, candidates[0], candidates=candidates)
+        return TimeResolution(True, issue="ambiguous", candidates=candidates)
+
+    future = [
+        candidate for candidate in candidates
+        if datetime.combine(intended_date, clock_time.fromisoformat(candidate), tzinfo=now.tzinfo) > now
+    ]
+    if len(future) == 1:
+        return TimeResolution(True, future[0], candidates=candidates)
+    if len(future) > 1:
+        return TimeResolution(True, issue="ambiguous", candidates=tuple(future))
+    return TimeResolution(True, issue="past", candidates=candidates)
+
+
+def _time_clarification(resolution: TimeResolution) -> str:
+    if resolution.issue == "past":
+        return "Esa hora ya ha pasado hoy. ¿A qué hora, señor?"
+    if resolution.issue == "ambiguous" and len(resolution.candidates) >= 2:
+        return f"¿Se refiere a las {resolution.candidates[0]} o a las {resolution.candidates[1]}, señor?"
+    return "¿A qué hora, señor?"
 
 
 def _extract_date(text: str, today: date) -> str | None:
     explicit = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", text)
     if explicit:
         return explicit.group(1)
-    if "manana" in text:
+    if re.search(r"\bmanana\b", text) and not re.search(r"\b(?:de|por)\s+la\s+manana\b", text):
         return (today + timedelta(days=1)).isoformat()
     if re.search(r"\bhoy\b", text):
         return today.isoformat()
@@ -81,7 +135,7 @@ def _reminder_query(text: str) -> str:
     return re.sub(r"\s+", " ", query).strip(" ¿?¡!,.-")
 
 
-def route_direct_intent(message: str, today: date) -> DirectIntent | None:
+def route_direct_intent(message: str, today: date, now: datetime | None = None) -> DirectIntent | None:
     text = normalize(message)
     page = re.search(r"\bpagina\s+(\d{1,5})\b", text)
     write_page = page and re.search(r"\b(apunta|anota|actualiza|pon|voy por|he llegado|marca)\b", text)
@@ -91,6 +145,8 @@ def route_direct_intent(message: str, today: date) -> DirectIntent | None:
         return DirectIntent("book_progress", "bookshell_books_query", {"mode": "progress", "limit": 1})
     if re.search(r"\b(que|cual)\b.*\blibro\b.*\b(leo|leyendo|actual)\b|\blibro actual\b", text):
         return DirectIntent("book_current", "bookshell_books_query", {"mode": "current", "limit": 1})
+    if re.search(r"\b(?:cual|cuando|que)\b.*\b(?:ultimo|ultima)\b.*\b(?:entrenamiento|sesion)\b|\b(?:ultimo|ultima)\s+(?:entrenamiento|sesion)\b", text):
+        return DirectIntent("gym_last", "bookshell_gym_query", {"mode": "last"}, domain="gym", operation="read")
     reminder_topic = re.search(r"\b(recordatorio|recuerdame|clase|cita|dentista|guardia)\b", text)
     creation = re.search(rf"\b{CREATE_PATTERN_NORMALIZED}\b", text)
     reminder_context = reminder_topic or re.search(r"\b(hoy|manana|lunes|martes|miercoles|jueves|viernes|sabado|domingo)\b", text)
@@ -99,13 +155,14 @@ def route_direct_intent(message: str, today: date) -> DirectIntent | None:
     if creation and reminder_context:
         arguments: dict[str, Any] = {"title": _reminder_title(message), "minutes_before": 0}
         target_date = _extract_date(text, today)
-        target_time = _extract_time(text)
+        time_resolution = _resolve_time(text, target_date, now)
+        target_time = time_resolution.value
         missing = tuple(field for field, value in (("date", target_date), ("time", target_time)) if not value)
         if target_date:
             arguments["target_date"] = target_date
         if target_time:
             arguments["target_time"] = target_time
-        clarification = "¿Para qué fecha, señor?" if "date" in missing else "¿A qué hora, señor?" if "time" in missing else None
+        clarification = "¿Para qué fecha, señor?" if "date" in missing else _time_clarification(time_resolution) if "time" in missing else None
         return DirectIntent(
             "reminder_create", "bookshell_create_reminder", arguments, clarification,
             "reminders", "create", missing,
@@ -134,11 +191,14 @@ def route_direct_intent(message: str, today: date) -> DirectIntent | None:
     return None
 
 
-def continue_direct_intent(pending: DirectIntent, message: str, today: date) -> DirectIntent | None:
+def continue_direct_intent(
+    pending: DirectIntent, message: str, today: date, now: datetime | None = None,
+) -> DirectIntent | None:
     if pending.kind != "reminder_create":
         return None
     arguments = dict(pending.arguments or {})
-    candidate = route_direct_intent(message, today)
+    candidate = route_direct_intent(message, today, now)
+    time_resolution = TimeResolution(False)
     if candidate and candidate.kind == pending.kind:
         candidate_arguments = dict(candidate.arguments or {})
         if candidate_arguments.get("title") not in {None, "Recordatorio"}:
@@ -149,13 +209,15 @@ def continue_direct_intent(pending: DirectIntent, message: str, today: date) -> 
     else:
         text = normalize(message)
         target_date = _extract_date(text, today)
-        target_time = _extract_time(text)
+        effective_date = target_date or str(arguments.get("target_date") or "") or None
+        time_resolution = _resolve_time(text, effective_date, now)
+        target_time = time_resolution.value
         if target_date:
             arguments["target_date"] = target_date
         if target_time:
             arguments["target_time"] = target_time
     missing = tuple(field for field in ("date", "time") if not arguments.get(f"target_{field}"))
-    clarification = "¿Para qué fecha, señor?" if "date" in missing else "¿A qué hora, señor?" if "time" in missing else None
+    clarification = "¿Para qué fecha, señor?" if "date" in missing else _time_clarification(time_resolution) if "time" in missing else None
     return DirectIntent(
         "reminder_create", "bookshell_create_reminder", arguments, clarification,
         "reminders", "create", missing,
@@ -165,7 +227,7 @@ def continue_direct_intent(pending: DirectIntent, message: str, today: date) -> 
 def is_pending_followup(message: str) -> bool:
     text = normalize(message)
     return bool(
-        _extract_time(text)
+        _resolve_time(text).present
         or _extract_date(text, date.today())
         or re.search(r"\b(eso no|no es lo que|te he pedido|te he dicho|no crealo|quiero que lo|anadelo|apuntalo)\b", text)
     )
@@ -180,6 +242,11 @@ def render_direct_result(kind: str, result: dict[str, Any]) -> str:
         return f"Está leyendo {title} y va por la página {page} de {pages}, señor."
     if kind == "book_update":
         return "Anotado, señor." if result.get("updated") and result.get("verified") else "No se pudo guardar, señor."
+    if kind == "gym_last":
+        workout = result.get("workout") or {}
+        if not workout:
+            return str(result.get("message") or "No encuentro entrenamientos registrados, señor.")
+        return f"Su último entrenamiento fue {workout.get('name') or 'una sesión'} el {workout.get('date')}, señor."
     if kind in {"reminders_today", "reminder_list", "reminder_search"}:
         items = list(result.get("items") or [])
         if not items:

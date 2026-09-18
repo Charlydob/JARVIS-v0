@@ -1,4 +1,5 @@
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -15,6 +16,9 @@ def test_common_books_and_reminder_intents_are_deterministic() -> None:
     reminder_list = route_direct_intent("¿Qué tengo hoy?", today)
     assert reminder_list.domain == "reminders"
     assert reminder_list.operation == "list"
+    gym = route_direct_intent("¿Cuál es mi último entrenamiento?", today)
+    assert gym.tool == "bookshell_gym_query"
+    assert gym.arguments == {"mode": "last"}
 
 
 def test_friday_is_resolved_and_missing_time_is_requested() -> None:
@@ -115,3 +119,34 @@ def test_exact_conversational_repair_keeps_pending_create() -> None:
     assert repaired.arguments["target_date"] == "2026-09-18"
     assert repaired.missing_fields == ("time",)
     assert repaired.clarification == "¿A qué hora, señor?"
+
+
+def test_spoken_hour_chooses_only_future_interpretation_for_today() -> None:
+    zone = ZoneInfo("Europe/Zurich")
+    now = datetime(2026, 9, 18, 8, 30, tzinfo=zone)
+    pending = route_direct_intent("Anota que hoy tengo clase de alemán", now.date(), now)
+    complete = continue_direct_intent(pending, "A las cinco y media", now.date(), now)
+    assert complete.arguments["target_time"] == "17:30"
+    assert complete.clarification is None
+
+
+def test_spoken_hour_asks_when_all_today_interpretations_are_past() -> None:
+    zone = ZoneInfo("Europe/Zurich")
+    now = datetime(2026, 9, 18, 18, 30, tzinfo=zone)
+    pending = route_direct_intent("Anota que hoy tengo clase de alemán", now.date(), now)
+    complete = continue_direct_intent(pending, "A las cinco y media hoy", now.date(), now)
+    assert "target_time" not in complete.arguments
+    assert complete.clarification == "Esa hora ya ha pasado hoy. ¿A qué hora, señor?"
+
+
+def test_explicit_past_morning_is_not_created_and_24_hour_time_is_direct() -> None:
+    zone = ZoneInfo("Europe/Zurich")
+    now = datetime(2026, 9, 18, 8, 30, tzinfo=zone)
+    pending = route_direct_intent("Anota que hoy tengo clase de alemán", now.date(), now)
+    morning = continue_direct_intent(pending, "A las cinco y media de la mañana", now.date(), now)
+    assert "target_time" not in morning.arguments
+    assert morning.clarification == "Esa hora ya ha pasado hoy. ¿A qué hora, señor?"
+
+    direct = route_direct_intent("Anota hoy clase de alemán a las 17:30", now.date(), now)
+    assert direct.arguments["target_time"] == "17:30"
+    assert direct.clarification is None

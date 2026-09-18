@@ -36,20 +36,23 @@ def test_query_update_and_confirm_real_shape() -> None:
 
 def test_reminder_uses_canonical_endpoint() -> None:
     captured = {}
+    captured_headers = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
             captured.update(json.loads(request.content))
+            captured_headers.update(request.headers)
             return httpx.Response(201, json={"ok": True, "created": True, "reminder": {"id": "reminder-1", **captured}})
         return httpx.Response(200, json={"reminders": [{"id": "reminder-1", **captured}]})
 
     client = BookShellClient(transport=httpx.MockTransport(handler))
-    result = asyncio.run(client.create_reminder({"title": "Clase de alemán", "target_date": "2026-09-19", "target_time": "18:00", "minutes_before": 60}))
+    result = asyncio.run(client.create_reminder({"title": "Clase de alemán", "target_date": "2026-09-19", "target_time": "18:00", "minutes_before": 60, "idempotency_key": "pending-action-1"}))
 
     assert result["created"] is True
     assert result["verified"] is True
     assert captured["timezone"] == "Europe/Zurich"
     assert captured["alerts"][0]["minutesBefore"] == 60
+    assert captured_headers["idempotency-key"] == "pending-action-1"
 
 
 def test_reminder_without_time_asks_and_does_not_write() -> None:
