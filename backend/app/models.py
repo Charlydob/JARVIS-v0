@@ -56,5 +56,7 @@ class FeedbackRequest(BaseModel):
 class StatusResponse(BaseModel):
     status: Literal["ready", "offline"]
     gateway_version: str
+    gateway_build_sha: str
+    web_build_sha: str
     core_connected: bool
     core: dict[str, Any] | None = None

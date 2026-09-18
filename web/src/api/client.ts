@@ -1,8 +1,10 @@
 export interface StatusResponse {
   status: 'ready' | 'offline'
   gateway_version: string
+  gateway_build_sha: string
+  web_build_sha: string
   core_connected: boolean
-  core: { providers?: Record<string, string>; ollama_ready?: boolean; last_seen?: string } | null
+  core: { providers?: Record<string, string>; ollama_ready?: boolean; last_seen?: string; build_sha?: string } | null
 }
 
 export interface ChatResponse {
@@ -40,6 +42,7 @@ export interface AudioCaptureMetadata {
   speechMs: number
   maxRms: number
   utteranceId: string
+  manualFinalize?: boolean
 }
 
 const apiUrl = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? ''
@@ -138,6 +141,7 @@ export async function transcribeAudio(audio: Blob, metadata: AudioCaptureMetadat
   form.append('speech_ms', String(Math.round(metadata.speechMs)))
   form.append('max_rms', String(metadata.maxRms))
   form.append('utterance_id', utteranceId)
+  form.append('manual_finalize', String(Boolean(metadata.manualFinalize)))
   if (conversationId) form.append('conversation_id', conversationId)
   const response = await checked(await timedFetch(`${apiUrl}/api/audio`, { method: 'POST', body: form }))
   const body = await response.json() as { transcript: string; language?: string; language_confidence?: number; discard_reason?: string; utterance_id?: string }

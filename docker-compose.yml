@@ -8,6 +8,7 @@ services:
       JARVIS_CORS_ORIGINS: ${JARVIS_CORS_ORIGINS:-https://jarvis.charlydob.com}
       JARVIS_CORE_TIMEOUT_SECONDS: ${JARVIS_CORE_TIMEOUT_SECONDS:-180}
       JARVIS_MAX_AUDIO_BYTES: ${JARVIS_MAX_AUDIO_BYTES:-26214400}
+      JARVIS_BUILD_SHA: ${JARVIS_BUILD_SHA:-development}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 10s
@@ -21,6 +22,7 @@ services:
       args:
         VITE_API_URL: ""
         VITE_WS_URL: "/ws"
+        VITE_BUILD_SHA: ${JARVIS_BUILD_SHA:-development}
     restart: unless-stopped
     depends_on:
       gateway:

@@ -15,7 +15,7 @@
     handle {
       root * /srv
       encode zstd gzip
-      @mutable path / /index.html /sw.js /manifest.webmanifest
+      @mutable path / /index.html /sw.js /manifest.webmanifest /version.json
       header @mutable Cache-Control "no-cache, no-store, must-revalidate"
       try_files {path} /index.html
       file_server

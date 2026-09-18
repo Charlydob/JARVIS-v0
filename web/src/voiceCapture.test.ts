@@ -26,4 +26,18 @@ describe('voice capture state machine', () => {
     expect(payloads).toHaveLength(20)
     expect(machine.bufferedChunks()).toBe(0)
   })
+
+  it('manually finalizes one utterance once and rejects stale audio', () => {
+    const machine = new VoiceCaptureMachine()
+    expect(machine.start('manual-1')).toBe(true)
+    machine.addChunk('manual-1', new Blob(['first']))
+    expect(machine.requestFinalize('manual-1')).toBe(true)
+    expect(machine.requestFinalize('manual-1')).toBe(false)
+    expect(machine.takeFinalizedChunks('manual-1')).toHaveLength(1)
+    expect(machine.addChunk('manual-1', new Blob(['late']))).toBe(false)
+    machine.processing('manual-1')
+    expect(machine.complete('manual-1')).toBe(true)
+    expect(machine.start('manual-2')).toBe(true)
+    expect(machine.bufferedChunks()).toBe(0)
+  })
 })

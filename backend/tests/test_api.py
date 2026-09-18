@@ -151,12 +151,13 @@ def test_audio_forwards_capture_diagnostics() -> None:
                 client.post,
                 "/api/audio",
                 files={"file": ("utterance.webm", b"audio", "audio/webm")},
-                data={"duration_ms": "6230", "speech_ms": "2810"},
+                data={"duration_ms": "6230", "speech_ms": "2810", "manual_finalize": "true"},
             )
             request = core.receive_json()
             assert request["action"] == "audio"
             assert request["payload"]["duration_ms"] == 6230
             assert request["payload"]["speech_ms"] == 2810
+            assert request["payload"]["manual_finalize"] is True
             core.send_json({
                 "type": "result",
                 "id": request["id"],

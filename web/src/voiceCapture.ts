@@ -25,6 +25,12 @@ export class VoiceCaptureMachine {
     return true
   }
 
+  retainRecentChunks(utteranceId: string, maximum: number) {
+    if (utteranceId !== this.utteranceId || this.phase !== 'LISTENING') return false
+    if (this.chunks.length > maximum) this.chunks.splice(0, this.chunks.length - maximum)
+    return true
+  }
+
   requestFinalize(utteranceId: string) {
     if (utteranceId !== this.utteranceId || this.phase !== 'LISTENING') return false
     this.phase = 'FINALIZING'

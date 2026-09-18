@@ -53,6 +53,8 @@ async def api_status(request: Request) -> StatusResponse:
     return StatusResponse(
         status="ready" if active.connected else "offline",
         gateway_version=VERSION,
+        gateway_build_sha=settings.build_sha,
+        web_build_sha=settings.build_sha,
         core_connected=active.connected,
         core=active.public_status,
     )
@@ -93,6 +95,7 @@ async def audio(
     max_rms: float | None = Form(default=None),
     utterance_id: str | None = Form(default=None),
     conversation_id: str | None = Form(default=None),
+    manual_finalize: bool = Form(default=False),
 ) -> AudioResponse:
     raw = await file.read(settings.max_audio_bytes + 1)
     if len(raw) > settings.max_audio_bytes:
@@ -110,6 +113,7 @@ async def audio(
                 "max_rms": max_rms,
                 "utterance_id": utterance_id,
                 "conversation_id": conversation_id,
+                "manual_finalize": manual_finalize,
             },
         )
         return AudioResponse.model_validate(result)

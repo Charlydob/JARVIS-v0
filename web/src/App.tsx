@@ -177,6 +177,12 @@ export default function App() {
     const poll = async () => {
       try {
         const status = await getStatus()
+        console.info('[JARVIS versions]', {
+          web_build_sha: import.meta.env.VITE_BUILD_SHA || 'development',
+          gateway_build_sha: status.gateway_build_sha,
+          expected_web_build_sha: status.web_build_sha,
+          core_build_sha: status.core?.build_sha || 'offline',
+        })
         if (cancelled) return
         const firstCheck = !statusCheckedRef.current
         statusCheckedRef.current = true
@@ -354,7 +360,7 @@ export default function App() {
     }
   }, [runConversation])
 
-  useContinuousVoice({
+  const voiceCapture = useContinuousVoice({
     enabled: coreOnline && !muted && view === 'face' && state !== 'error',
     paused: busy,
     onListening: useCallback(() => dispatch({ type: 'START_LISTENING' }), []),
@@ -539,6 +545,14 @@ export default function App() {
       <div className="quick-feedback" aria-label="Valorar la última respuesta de JARVIS">
         <button disabled={!latestResponse} className={latestResponse?.rating === 'good' ? 'selected' : ''} onClick={() => latestResponse && void rate(latestResponse.id, 'good')} aria-label="Marcar última respuesta como buena" aria-pressed={latestResponse?.rating === 'good'}><Cookie size={18} /></button>
         <button disabled={!latestResponse} className={latestResponse?.rating === 'bad' ? 'selected' : ''} onClick={() => latestResponse && void rate(latestResponse.id, 'bad')} aria-label="Marcar última respuesta como mala" aria-pressed={latestResponse?.rating === 'bad'}><WhipIcon size={18} /></button>
+        <button
+          disabled={!voiceCapture.canFinalize}
+          onClick={() => {
+            if (voiceCapture.finalizeNow()) setNotice('Finalizando audio…')
+          }}
+          aria-label="Finalizar y enviar la grabación ahora"
+          title="Enviar audio ahora"
+        ><Send size={18} /></button>
       </div>
       <button className="menu-button" onClick={() => setMenuOpen(!menuOpen)} aria-label="Abrir menú"><Menu size={24} /></button>
       {menuOpen && (
