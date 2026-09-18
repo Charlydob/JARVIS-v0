@@ -1,4 +1,5 @@
 import base64
+import logging
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,44 @@ import pytest
 from jarvis_core.config import CoreSettings
 from jarvis_core.services import JarvisServices
 from jarvis_core.tools import Tool
+
+
+@pytest.mark.asyncio
+async def test_exact_reminder_create_resumes_pending_hour_and_executes_once(tmp_path: Path, caplog) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+    writes: list[dict] = []
+
+    async def create_reminder(arguments):
+        writes.append(dict(arguments))
+        return {"created": True, "verified": True, "reminder": {"id": "r1", **arguments}}
+
+    services.tools.register(Tool(
+        "bookshell_create_reminder", "create", {"type": "object"}, create_reminder,
+    ))
+    chunks: list[str] = []
+
+    async def collect(chunk: str) -> None:
+        chunks.append(chunk)
+
+    caplog.set_level(logging.INFO, logger="jarvis-core.tools")
+    first = await services.chat_stream({
+        "message": "¿Podrías añadir como recordatorio hoy que tengo clase de alemán?",
+        "conversation_id": "exact-reminder-flow", "turn_id": "exact-reminder-turn-1",
+    }, collect)
+    second = await services.chat_stream({
+        "message": "A las seis.",
+        "conversation_id": "exact-reminder-flow", "turn_id": "exact-reminder-turn-2",
+    }, collect)
+
+    assert first["message"] == "¿A qué hora, señor?"
+    assert second["message"] == "Recordatorio creado, señor."
+    assert len(writes) == 1
+    assert writes[0]["title"] == "clase de alemán"
+    assert writes[0]["target_time"] == "06:00"
+    assert "route_domain=reminders route_operation=create missing_fields=time pending_action_created=true" in caplog.text
+    assert "pending_action_resumed=true" in caplog.text
+    assert "tool=bookshell.reminders.create" in caplog.text
+    assert "tool_success=true verification_success=true" in caplog.text
 
 
 @pytest.mark.asyncio

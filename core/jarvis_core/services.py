@@ -17,7 +17,7 @@ from edge_tts import VoicesManager
 from faster_whisper import WhisperModel
 from jarvis_core.config import CoreSettings
 from jarvis_core.feedback import FeedbackLearning
-from jarvis_core.intents import DirectIntent, continue_direct_intent, render_direct_result, route_direct_intent
+from jarvis_core.intents import DirectIntent, continue_direct_intent, is_pending_followup, render_direct_result, route_direct_intent
 from jarvis_core.language import SessionLanguagePolicy, response_language
 from jarvis_core.storage import Storage
 from jarvis_core.tools import ToolRegistry
@@ -437,11 +437,25 @@ class JarvisServices:
         routing_started = time.perf_counter()
         today = datetime.now().astimezone().date()
         direct = route_direct_intent(message, today)
-        if direct is None and conversation_id in self._pending_intents:
+        pending_resumed = False
+        if conversation_id in self._pending_intents and (direct is None or is_pending_followup(message)):
             direct = continue_direct_intent(self._pending_intents[conversation_id], message, today)
+            pending_resumed = direct is not None
+        routed = direct
+        if routed and routed.domain:
+            TOOL_LOGGER.info(
+                "turn_id=%s route_domain=%s route_operation=%s missing_fields=%s pending_action_resumed=%s",
+                turn_id, routed.domain, routed.operation or "unknown",
+                ",".join(routed.missing_fields) or "none", str(pending_resumed).lower(),
+            )
+        # Complex reminder mutations remain on the existing tool-selection path after
+        # their domain and operation have been classified. Direct execution is reserved
+        # for deterministic create/list/search operations.
+        if direct and direct.tool is None and direct.clarification is None:
+            direct = None
         PERFORMANCE_LOGGER.info(
             "turn_id=%s stage=intent_routing duration_ms=%.1f direct=%s",
-            turn_id, (time.perf_counter() - routing_started) * 1000, direct.kind if direct else "none",
+            turn_id, (time.perf_counter() - routing_started) * 1000, routed.kind if routed else "none",
         )
         user_language = self.languages.resolve(
             conversation_id, message, payload.get("language"), payload.get("language_confidence")
@@ -450,12 +464,18 @@ class JarvisServices:
             if direct.clarification:
                 answer = direct.clarification
                 self._pending_intents[conversation_id] = direct
+                TOOL_LOGGER.info(
+                    "turn_id=%s route_domain=%s route_operation=%s missing_fields=%s pending_action_created=true",
+                    turn_id, direct.domain or "unknown", direct.operation or "unknown",
+                    ",".join(direct.missing_fields) or "none",
+                )
             elif direct.tool and direct.arguments is not None:
                 self._pending_intents.pop(conversation_id, None)
                 tool_call_id = str(uuid4())
+                public_tool = "bookshell.reminders.create" if direct.tool == "bookshell_create_reminder" else direct.tool
                 TOOL_LOGGER.info(
-                    "turn_id=%s tool_call_id=%s event=tool_requested tool=%s arguments=%s",
-                    turn_id, tool_call_id, direct.tool, json.dumps(direct.arguments, ensure_ascii=False),
+                    "turn_id=%s tool_call_id=%s event=tool_requested tool=%s internal_tool=%s arguments=%s",
+                    turn_id, tool_call_id, public_tool, direct.tool, json.dumps(direct.arguments, ensure_ascii=False),
                 )
                 tool_started = time.perf_counter()
                 try:
@@ -463,9 +483,11 @@ class JarvisServices:
                     parsed = json.loads(raw_result)
                     self._log_tool_timings(turn_id, tool_call_id, parsed)
                     succeeded = self._tool_succeeded(raw_result, direct.tool)
+                    verification_succeeded = isinstance(parsed, dict) and parsed.get("verified") is True
                     TOOL_LOGGER.info(
-                        "turn_id=%s tool_call_id=%s event=%s tool=%s duration_ms=%.1f",
-                        turn_id, tool_call_id, "tool_success" if succeeded else "tool_error", direct.tool,
+                        "turn_id=%s tool_call_id=%s event=%s tool=%s internal_tool=%s tool_success=%s verification_success=%s duration_ms=%.1f",
+                        turn_id, tool_call_id, "tool_success" if succeeded else "tool_error", public_tool, direct.tool,
+                        str(succeeded).lower(), str(verification_succeeded).lower(),
                         (time.perf_counter() - tool_started) * 1000,
                     )
                     answer = render_direct_result(direct.kind, parsed if isinstance(parsed, dict) else {})

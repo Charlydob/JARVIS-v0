@@ -52,7 +52,7 @@ class ToolRegistry:
             "gym": r"\b(gym|gimnasio|entren|ejercicio|series?|repeticiones?|kilos?|press banca|levante|pesas?)\b",
             "habits": r"\b(habito|habitos|racha|cumpl|pendientes? hoy)\b",
             "finance": r"\b(gasto|gastado|ingreso|sueldo|transfer|francos?|chf|euros?|saldo|cuentas?|movimiento|spent|expense|income|balance)\b",
-            "reminder": r"\b(recordatorios?|recuerdame|agenda|guardia|dentista|cita|evento|que tengo hoy|que tengo esta semana|remind|reminders?|schedule|appointment)\b",
+            "reminder": r"\b(recordatorios?|recuerdame|agenda|guardia|dentista|clase|cita|evento|que tengo hoy|que tengo esta semana|remind|reminders?|schedule|appointment)\b",
             "world": r"\b(lugar|sitio|cafeteria|restaurante|local|ubicacion|guardado en|valoracion|puntuacion)\b",
             "notes": r"\b(nota|notas|apunte|buscar en mis notas)\b",
             "recipes": r"\b(receta|recetas|ingredientes?|cocinar|preparacion)\b",
@@ -75,7 +75,11 @@ class ToolRegistry:
     def direct_query(self, message: str) -> tuple[str, dict[str, Any]] | None:
         """Bypass a model routing round only for unambiguous, read-only intents."""
         normalized = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode()
-        if re.search(r"\b(recordatorios?|reminders?)\b", normalized) and re.search(r"\b(hoy|today)\b", normalized):
+        reminder_write = re.search(
+            r"\b(anad\w*|agreg\w*|cre\w*|apunt\w*|anot\w*|recuerdame|ponme|cambia|mueve|actualiza|cancela|elimina|borra|completa)\b",
+            normalized,
+        )
+        if not reminder_write and re.search(r"\b(recordatorios?|reminders?)\b", normalized) and re.search(r"\b(hoy|today)\b", normalized):
             if "bookshell_reminders_query" in self._tools:
                 return "bookshell_reminders_query", {"scope": "today"}
         if re.search(r"\b(pagina|page)\b", normalized) and re.search(r"\b(libro|book|voy|current)\b", normalized):
