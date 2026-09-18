@@ -466,3 +466,37 @@ El script reproducible es `scripts/verify_reliability_v2.py` y deja restaurada l
 - Core/gateway: `f9ad202` (`fix: verify tool writes and deduplicate turns`).
 - PWA: `fb4c07d` (`fix: deduplicate voice and stream events`).
 - Este bloque documental forma el commit posterior inmediato. Google Sheets y animaciones avanzadas no se tocaron.
+
+## iPhone voice + reminder state consistency
+
+### Captura de voz
+
+- La captura usa ahora una máquina estricta `IDLE → LISTENING → FINALIZING → TRANSCRIBING → PROCESSING → SPEAKING → IDLE` con un UUID por utterance.
+- Cada inicio vacía el buffer. `FINALIZING` solo se puede solicitar una vez y, al construir el Blob, los chunks se extraen y borran inmediatamente.
+- Hay watchdog independiente de silencio, límite máximo de grabación de 30 segundos y timeout de cierre de `MediaRecorder`.
+- Durante transcripción, procesamiento y TTS la pista del micrófono queda deshabilitada; se reactiva únicamente al volver a escucha.
+- Los logs del navegador incluyen `utterance_id`, inicio, detección de voz, silencio, finalización, duración, bytes, comienzo de transcripción, texto y descarte. El Core colapsa además frases consecutivas idénticas dentro de una sola transcripción.
+- La prueba de máquina ejecuta 20 utterances consecutivas: cada una finaliza una sola vez y el buffer queda a cero antes de la siguiente.
+
+### Hora, pending action y BookShell
+
+- Las horas habladas de 12 horas se resuelven en `Europe/Zurich`. Para hoy se elige la única interpretación futura; si ambas son futuras pregunta, y si todas pasaron no crea nada.
+- `pending_action` conserva título, fecha, clave idempotente y momento de creación durante diez minutos. Solo se elimina tras `verified: true`; los reintentos simultáneos comparten lock/resultado por clave idempotente.
+- CREATE envía `Idempotency-Key`. La lectura posterior y las consultas de hoy usan `Cache-Control: no-cache`; “hoy” conserva recordatorios vencidos y excluye cancelados.
+- Libro/página, recordatorios de hoy y último entrenamiento usan tool real en cada turno, sin memoria como fuente factual.
+
+### Audio y permisos de iOS
+
+- Se detecta `navigator.audioSession`. Antes de grabar se usa `play-and-record`; durante TTS se deshabilita la pista de entrada y se usa `playback`; al terminar se restaura captura.
+- No se intenta seleccionar un dispositivo de salida con APIs inexistentes. WebKit mantiene incidencias conocidas de routing mientras `getUserMedia` está activo; por eso la verificación física sigue siendo necesaria en el iPhone objetivo.
+- `getUserMedia` se llama una vez por sesión de página y se reutiliza el stream vivo. Se registran contador, razón, reutilización y recreación. `pagehide` libera las pistas.
+- Tras cerrar completamente y reabrir una PWA, una nueva solicitud de permiso puede depender de WebKit/iOS y no puede evitarse de forma segura desde JavaScript.
+
+### Verificación real
+
+- `Anota que hoy tengo clase de alemán` preguntó hora sin escribir.
+- `A las cinco y media` se resolvió como `17:30`, creó un solo recordatorio y verificó el read-back.
+- Dos consultas consecutivas de `¿Qué tengo hoy?` volvieron a BookShell y devolvieron inmediatamente la clase.
+- Fixture `97be3928-2b50-4fae-89e6-96d3c5d83027` cancelada; lectura final ausente.
+- Tiempos: aclaración 234,8 ms; crear+verificar 680,7 ms; consultas frescas 357,1 ms y 347,1 ms.
+- Core `48 passed`; PWA `7 passed`; ESLint y build correctos. La prueba física de 20 utterances y routing de altavoz debe completarse en el iPhone real del usuario; no se declara realizada desde el entorno de desarrollo.
