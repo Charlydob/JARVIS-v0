@@ -118,6 +118,9 @@ class ToolRegistry:
         tool, this conservative fallback calls the domain's read endpoint rather than
         allowing a cached or invented factual answer.
         """
+        required = self.required_read_name(message)
+        if required is None:
+            return None
         available = {
             str(item.get("function", {}).get("name", ""))
             for item in definitions
@@ -147,7 +150,7 @@ class ToolRegistry:
             candidates.append(("bookshell_notes_query", {"limit": 10}))
         if "bookshell_recipes_query" in available:
             candidates.append(("bookshell_recipes_query", {"limit": 10}))
-        return candidates[0] if len(candidates) == 1 else None
+        return next((candidate for candidate in candidates if candidate[0] == required), None)
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         tool = self._tools.get(name)

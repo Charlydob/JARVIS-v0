@@ -62,6 +62,14 @@ def test_normal_conversation_uses_zero_tools_and_routing_caps_at_three() -> None
     assert len(registry.definitions_for("Recuérdame mi libro y la página mañana")) <= 3
     assert registry.direct_query("¿Qué recordatorios tengo hoy?") == ("bookshell_reminders_query", {"scope": "today"})
     assert registry.direct_query("Añade un recordatorio hoy para clase de alemán") is None
+    assert registry.fallback_read(
+        "Añade una nota sobre alemán",
+        registry.definitions_for("Añade una nota sobre alemán"),
+    ) is None
+    assert registry.fallback_read(
+        "¿Qué recordatorios tengo hoy?",
+        registry.definitions_for("¿Qué recordatorios tengo hoy?"),
+    ) == ("bookshell_reminders_query", {"scope": "today"})
     assert registry.direct_query("Cambia el recordatorio de clase de hoy") is None
     assert [item["function"]["name"] for item in registry.definitions_for("Cambia la clase de alemán a las 18:00")] == [
         "bookshell_reminders_query", "bookshell_reminder_update", "bookshell_create_reminder",
