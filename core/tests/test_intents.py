@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from jarvis_core.intents import continue_direct_intent, route_direct_intent
+from jarvis_core.intents import continue_direct_intent, is_pending_field_response, route_direct_intent
 
 
 def test_common_books_and_reminder_intents_are_deterministic() -> None:
@@ -61,7 +61,7 @@ def test_reminder_clarification_preserves_date_and_title() -> None:
             "create", "¿A qué hora, señor?",
             {"title": "clase de alemán", "target_date": "2026-09-18"},
         ),
-        ("¿Qué tengo para hoy?", "list", None, {"from": "2026-09-18", "until": "2026-09-18"}),
+        ("¿Qué tengo para hoy?", "list", None, {"scope": "today"}),
         (
             "Recuérdame comprar leche mañana a las 18:00.",
             "create", None,
@@ -150,3 +150,46 @@ def test_explicit_past_morning_is_not_created_and_24_hour_time_is_direct() -> No
     direct = route_direct_intent("Anota hoy clase de alemán a las 17:30", now.date(), now)
     assert direct.arguments["target_time"] == "17:30"
     assert direct.clarification is None
+
+
+@pytest.mark.parametrize(
+    ("message", "scope"),
+    [
+        ("¿Qué recordatorios tengo hoy?", "today"),
+        ("¿Qué recordatorios tengo mañana?", "tomorrow"),
+        ("¿Qué recordatorios tengo esta semana?", "this_week"),
+        ("¿Qué recordatorios tengo la semana que viene?", "next_week"),
+    ],
+)
+def test_reminder_temporal_scopes_are_not_reused_or_turned_into_queries(message: str, scope: str) -> None:
+    intent = route_direct_intent(message, date(2026, 9, 18))
+    assert intent is not None
+    assert intent.arguments == {"scope": scope}
+    assert intent.operation == "list"
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ("cinco", "17:00"),
+        ("cinco y media", "17:30"),
+        ("cinco y medio", "17:30"),
+        ("cinco y cuarto", "17:15"),
+        ("seis menos cuarto", "17:45"),
+        ("17:30", "17:30"),
+        ("cinco treinta", "17:30"),
+    ],
+)
+def test_pending_accepts_spoken_spanish_times(reply: str, expected: str) -> None:
+    zone = ZoneInfo("Europe/Zurich")
+    now = datetime(2026, 9, 18, 8, 30, tzinfo=zone)
+    pending = route_direct_intent("Crea un recordatorio para hoy", now.date(), now)
+    assert is_pending_field_response(pending, reply) is True
+    complete = continue_direct_intent(pending, reply, now.date(), now)
+    assert complete.arguments["target_time"] == expected
+    assert complete.clarification is None
+
+
+def test_unrelated_complete_intent_does_not_resume_pending_time() -> None:
+    pending = route_direct_intent("Crea un recordatorio para hoy", date(2026, 9, 18))
+    assert is_pending_field_response(pending, "¿Qué libro estoy leyendo?") is False

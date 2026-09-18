@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import re
 import time
 import unicodedata
@@ -10,6 +11,9 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from jarvis_core.tools import Tool, ToolRegistry
+
+
+LOGGER = logging.getLogger("jarvis-core.bookshell.reminders")
 
 
 def _norm(value: Any) -> str:
@@ -47,6 +51,35 @@ class BookShellDomains:
 
     def today(self) -> str:
         return datetime.now(self.zone).date().isoformat()
+
+    def _reminder_range(self, scope: str, arguments: dict[str, Any]) -> tuple[str, str]:
+        today = datetime.now(self.zone).date()
+        if scope == "today":
+            return today.isoformat(), today.isoformat()
+        if scope == "tomorrow":
+            tomorrow = today + timedelta(days=1)
+            return tomorrow.isoformat(), tomorrow.isoformat()
+        monday = today - timedelta(days=today.weekday())
+        if scope == "this_week":
+            return monday.isoformat(), (monday + timedelta(days=6)).isoformat()
+        if scope == "next_week":
+            next_monday = monday + timedelta(days=7)
+            return next_monday.isoformat(), (next_monday + timedelta(days=6)).isoformat()
+        return str(arguments.get("from") or ""), str(arguments.get("until") or "")
+
+    def _reminder_temporal_state(self, item: dict[str, Any]) -> str:
+        status = str(item.get("status") or "pending").casefold()
+        if status == "completed":
+            return "completado"
+        if status in {"expired", "cancelled"}:
+            return "vencido" if status == "expired" else "cancelado"
+        target_date = str(item.get("targetDate") or "")
+        target_time = str(item.get("targetTime") or "23:59")
+        try:
+            target = datetime.fromisoformat(f"{target_date}T{target_time}").replace(tzinfo=self.zone)
+        except ValueError:
+            return "pendiente"
+        return "vencido" if target < datetime.now(self.zone) else "próximo"
 
     async def gym_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
         root = await self.client.data("gym/gym") or {}
@@ -259,11 +292,11 @@ class BookShellDomains:
     async def reminders_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
         params = {key: arguments[key] for key in ("status", "from", "until", "limit") if arguments.get(key) is not None}
         scope = str(arguments.get("scope") or "")
-        today = datetime.now(self.zone).date()
-        if scope == "today":
-            params.update({"from": today.isoformat(), "until": today.isoformat()})
-        elif scope == "week":
-            params.update({"from": today.isoformat(), "until": (today + timedelta(days=7)).isoformat()})
+        range_from, range_until = self._reminder_range(scope, arguments)
+        if range_from:
+            params["from"] = range_from
+        if range_until:
+            params["until"] = range_until
         payload = await self.client._request(
             "GET", "/reminders", params=params,
             headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
@@ -272,6 +305,8 @@ class BookShellDomains:
             item for item in list(payload.get("reminders") or [])
             if str(item.get("status") or "pending").casefold() != "cancelled"
         ]
+        for item in items:
+            item["temporalState"] = self._reminder_temporal_state(item)
         query = _norm(arguments.get("query"))
         person = _norm(arguments.get("person"))
         event_type = _norm(arguments.get("event_type"))
@@ -281,7 +316,20 @@ class BookShellDomains:
             items = [item for item in items if person in _norm(f"{item.get('title')} {item.get('description')} {json.dumps(item.get('source') or {})}")]
         if event_type:
             items = [item for item in items if event_type in _norm(f"{item.get('type')} {item.get('category')} {item.get('title')}")]
-        return {"items": items, "count": len(items)}
+        trace = dict(getattr(self.client, "last_trace", {}) or {})
+        LOGGER.info(
+            "route_domain=reminders route_operation=read date_range=%s..%s tool=bookshell_reminders_query request_path=%s http_status=%s result_count=%d",
+            range_from or "none", range_until or "none", trace.get("request_path", "/reminders"),
+            trace.get("http_status", "unknown"), len(items),
+        )
+        return {
+            "items": items, "count": len(items), "range": scope or "custom",
+            "dateRange": {"from": range_from or None, "until": range_until or None},
+            "_trace": {
+                "request_path": trace.get("request_path", "/reminders"),
+                "http_status": trace.get("http_status"), "result_count": len(items),
+            },
+        }
 
     async def reminder_update(self, arguments: dict[str, Any]) -> dict[str, Any]:
         reminder_id = str(arguments["reminder_id"])
@@ -500,7 +548,7 @@ def register_domain_tools(registry: ToolRegistry, domains: BookShellDomains) -> 
     registry.register(Tool("bookshell_habits_mark", "Marca un hábito o actualiza su valor cuantitativo. Ejecuta directamente si la intención es clara; desmarcar requiere confirmed=true.", {"type": "object", "properties": {"name": {"type": "string"}, "date": {"type": "string"}, "completed": {"type": "boolean"}, "value": {"type": "number"}, "unit": {"type": "string", "enum": ["count", "minutes", "seconds"]}, "confirmed": {"type": "boolean"}}, "required": ["name"]}, domains.habits_mark))
     registry.register(Tool("bookshell_finance_query", "Consulta cuentas, saldos, categorías, movimientos, último gasto o totales de gastos/ingresos por periodo y categoría.", {"type": "object", "properties": {"mode": {"type": "string", "enum": ["accounts", "categories", "movements", "latest", "summary"]}, "type": {"type": "string", "enum": ["expense", "income", "transfer"]}, "category": {"type": "string"}, "period": {"type": "string", "enum": ["today", "week", "month"]}, "from_date": {"type": "string"}, "until_date": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["mode"]}, domains.finance_query))
     registry.register(Tool("bookshell_finance_create", "Crea gasto, ingreso o transferencia mediante la API idempotente de BookShell. Si cuenta/categoría no son inequívocas devuelve una única aclaración; no adivina movimientos ambiguos.", {"type": "object", "properties": {"type": {"type": "string", "enum": ["expense", "income", "transfer"]}, "amount": {"type": "number"}, "currency": {"type": "string"}, "description": {"type": "string"}, "category": {"type": "string"}, "account": {"type": "string"}, "from_account": {"type": "string"}, "to_account": {"type": "string"}, "date": {"type": "string"}, "idempotency_key": {"type": "string"}}, "required": ["type", "amount"]}, domains.finance_write))
-    registry.register(Tool("bookshell_reminders_query", "Consulta/busca recordatorios por hoy/semana, fechas, texto, persona o tipo de evento.", {"type": "object", "properties": {"scope": {"type": "string", "enum": ["today", "week"]}, "query": {"type": "string"}, "person": {"type": "string"}, "event_type": {"type": "string"}, "status": {"type": "string"}, "from": {"type": "string"}, "until": {"type": "string"}, "limit": {"type": "integer"}}}, domains.reminders_query))
+    registry.register(Tool("bookshell_reminders_query", "Consulta/busca recordatorios por hoy, mañana, esta semana, próxima semana, fechas, texto, persona o tipo de evento.", {"type": "object", "properties": {"scope": {"type": "string", "enum": ["today", "tomorrow", "this_week", "next_week"]}, "query": {"type": "string"}, "person": {"type": "string"}, "event_type": {"type": "string"}, "status": {"type": "string"}, "from": {"type": "string"}, "until": {"type": "string"}, "limit": {"type": "integer"}}}, domains.reminders_query))
     registry.register(Tool("bookshell_reminder_update", "Modifica, completa o cancela un recordatorio existente. Cancelar requiere confirmed=true; completar y reprogramar no.", {"type": "object", "properties": {"reminder_id": {"type": "string"}, "action": {"type": "string", "enum": ["update", "complete", "cancel"]}, "title": {"type": "string"}, "description": {"type": "string"}, "target_date": {"type": "string"}, "target_time": {"type": "string"}, "confirmed": {"type": "boolean"}}, "required": ["reminder_id", "action"]}, domains.reminder_update))
     registry.register(Tool("bookshell_world_query", "Busca lugares guardados, locales, geografía o estancias por nombre, ciudad, categoría o país, incluyendo valoraciones.", {"type": "object", "properties": {"scope": {"type": "string", "enum": ["all", "saved", "places", "geography", "stays"]}, "query": {"type": "string"}, "city": {"type": "string"}, "category": {"type": "string"}, "country": {"type": "string"}, "limit": {"type": "integer"}}}, domains.world_query))
     registry.register(Tool("bookshell_world_write", "Guarda o actualiza un lugar/local en BookShell; no elimina datos.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "scope": {"type": "string", "enum": ["saved", "places", "geography"]}, "item_id": {"type": "string"}, "name": {"type": "string"}, "category": {"type": "string"}, "city": {"type": "string"}, "country": {"type": "string"}, "address": {"type": "string"}, "note": {"type": "string"}, "rating": {"type": "number"}, "lat": {"type": "number"}, "lon": {"type": "number"}}, "required": ["action", "scope"]}, domains.world_write))

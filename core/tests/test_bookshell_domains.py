@@ -1,5 +1,7 @@
 import asyncio
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from jarvis_core.integrations.bookshell_domains import BookShellDomains
 
@@ -109,10 +111,11 @@ def test_today_reminders_are_fresh_include_overdue_and_exclude_cancelled() -> No
 
         async def _request(self, _method: str, _path: str, **kwargs: Any) -> dict[str, Any]:
             self.request_kwargs = kwargs
+            target_date = kwargs["params"]["from"]
             return {"reminders": [
-                {"id": "past", "title": "Clase", "targetTime": "05:30", "status": "pending"},
-                {"id": "future", "title": "Dentista", "targetTime": "17:30", "status": "pending"},
-                {"id": "cancelled", "title": "Borrado", "targetTime": "12:00", "status": "cancelled"},
+                {"id": "past", "title": "Clase", "targetDate": target_date, "targetTime": "05:30", "status": "pending"},
+                {"id": "future", "title": "Dentista", "targetDate": target_date, "targetTime": "23:59", "status": "pending"},
+                {"id": "cancelled", "title": "Borrado", "targetDate": target_date, "targetTime": "12:00", "status": "cancelled"},
             ]}
 
     client = ReminderClient({})
@@ -120,3 +123,30 @@ def test_today_reminders_are_fresh_include_overdue_and_exclude_cancelled() -> No
     assert [item["id"] for item in result["items"]] == ["past", "future"]
     assert client.request_kwargs["headers"]["Cache-Control"] == "no-cache"
     assert client.request_kwargs["params"]["from"] == client.request_kwargs["params"]["until"]
+    assert result["items"][0]["temporalState"] == "vencido"
+
+
+def test_reminder_scopes_send_distinct_calendar_ranges() -> None:
+    class ReminderClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__({})
+            self.requests: list[dict[str, Any]] = []
+
+        async def _request(self, _method: str, _path: str, **kwargs: Any) -> dict[str, Any]:
+            self.requests.append(dict(kwargs["params"]))
+            return {"reminders": []}
+
+    client = ReminderClient()
+    domains = BookShellDomains(client)
+    for scope in ("today", "tomorrow", "this_week", "next_week"):
+        result = asyncio.run(domains.reminders_query({"scope": scope}))
+        assert result["range"] == scope
+
+    today = datetime.now(ZoneInfo(client.timezone)).date()
+    monday = today - timedelta(days=today.weekday())
+    assert client.requests == [
+        {"from": today.isoformat(), "until": today.isoformat()},
+        {"from": (today + timedelta(days=1)).isoformat(), "until": (today + timedelta(days=1)).isoformat()},
+        {"from": monday.isoformat(), "until": (monday + timedelta(days=6)).isoformat()},
+        {"from": (monday + timedelta(days=7)).isoformat(), "until": (monday + timedelta(days=13)).isoformat()},
+    ]

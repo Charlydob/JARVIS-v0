@@ -45,16 +45,32 @@ class TimeResolution:
     candidates: tuple[str, ...] = ()
 
 
-def _resolve_time(text: str, target_date: str | None = None, now: datetime | None = None) -> TimeResolution:
-    clock = re.search(r"\ba\s+las?\s+(\d{1,2})(?::(\d{2}))?\b", text)
+def _resolve_time(
+    text: str, target_date: str | None = None, now: datetime | None = None, *, allow_bare: bool = False,
+) -> TimeResolution:
+    prefix = r"(?:a\s+las?\s+)?" if allow_bare else r"a\s+las?\s+"
+    clock = re.search(rf"\b{prefix}(\d{{1,2}})(?::(\d{{2}}))?\b", text)
     if clock:
         hour, minute = int(clock.group(1)), int(clock.group(2) or 0)
     else:
-        spoken = re.search(r"\ba\s+las?\s+(" + "|".join(HOUR_WORDS) + r")(?:\s+y\s+(media|cuarto))?\b", text)
+        spoken = re.search(
+            r"\b" + prefix + r"(" + "|".join(HOUR_WORDS)
+            + r")(?:\s+(?:(y)\s+(media|medio|cuarto|treinta)|(menos)\s+cuarto|treinta))?\b",
+            text,
+        )
         if not spoken:
             return TimeResolution(False)
         hour = HOUR_WORDS[spoken.group(1)]
-        minute = 30 if spoken.group(2) == "media" else 15 if spoken.group(2) == "cuarto" else 0
+        modifier = spoken.group(3) or ("menos_cuarto" if spoken.group(4) else "")
+        if modifier == "menos_cuarto":
+            hour = (hour - 1) % 24
+            minute = 45
+        elif modifier in {"media", "medio", "treinta"} or re.search(rf"\b{spoken.group(1)}\s+treinta\b", spoken.group(0)):
+            minute = 30
+        elif modifier == "cuarto":
+            minute = 15
+        else:
+            minute = 0
     if hour > 23 or minute > 59:
         return TimeResolution(True, issue="invalid")
 
@@ -116,6 +132,18 @@ def _extract_date(text: str, today: date) -> str | None:
     return _next_weekday(today, target) if target is not None else None
 
 
+def _temporal_scope(text: str) -> str | None:
+    if re.search(r"\b(?:la\s+)?semana\s+(?:que\s+viene|proxima|siguiente)\b", text):
+        return "next_week"
+    if re.search(r"\besta\s+semana\b", text):
+        return "this_week"
+    if re.search(r"\bmanana\b", text) and not re.search(r"\b(?:de|por)\s+la\s+manana\b", text):
+        return "tomorrow"
+    if re.search(r"\bhoy\b", text):
+        return "today"
+    return None
+
+
 def _reminder_title(message: str) -> str:
     title = re.sub(rf"(?is)^.*?\b{CREATE_PATTERN}\b", "", message, count=1).strip()
     title = re.sub(r"(?i)^\s*(?:como\s+)?(?:un\s+)?recordatorio(?:\s+para)?\s*", "", title)
@@ -129,7 +157,7 @@ def _reminder_title(message: str) -> str:
 
 def _reminder_query(text: str) -> str:
     query = re.sub(
-        r"\b(?:que|tengo|algo|para|hoy|manana|este|el|lunes|martes|miercoles|jueves|viernes|sabado|domingo|recordatorios?|hay|cuando)\b",
+        r"\b(?:que|tengo|algo|para|hoy|manana|esta|este|la|el|semana|proxima|siguiente|viene|lunes|martes|miercoles|jueves|viernes|sabado|domingo|recordatorios?|hay|cuando)\b",
         " ", text,
     )
     return re.sub(r"\s+", " ", query).strip(" ¿?¡!,.-")
@@ -176,10 +204,13 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         )
         if operation != "read":
             return DirectIntent(f"reminder_{operation}", domain="reminders", operation=operation)
+        scope = _temporal_scope(text)
         target_date = _extract_date(text, today)
         query = _reminder_query(text)
         arguments: dict[str, Any] = {}
-        if target_date:
+        if scope:
+            arguments["scope"] = scope
+        elif target_date:
             arguments.update({"from": target_date, "until": target_date})
         if query:
             arguments["query"] = query
@@ -210,7 +241,7 @@ def continue_direct_intent(
         text = normalize(message)
         target_date = _extract_date(text, today)
         effective_date = target_date or str(arguments.get("target_date") or "") or None
-        time_resolution = _resolve_time(text, effective_date, now)
+        time_resolution = _resolve_time(text, effective_date, now, allow_bare=True)
         target_time = time_resolution.value
         if target_date:
             arguments["target_date"] = target_date
@@ -227,10 +258,24 @@ def continue_direct_intent(
 def is_pending_followup(message: str) -> bool:
     text = normalize(message)
     return bool(
-        _resolve_time(text).present
+        _resolve_time(text, allow_bare=True).present
         or _extract_date(text, date.today())
         or re.search(r"\b(eso no|no es lo que|te he pedido|te he dicho|no crealo|quiero que lo|anadelo|apuntalo)\b", text)
     )
+
+
+def is_pending_field_response(pending: DirectIntent, message: str) -> bool:
+    """Only resume a pending action when the reply can fill its expected field."""
+    text = normalize(message)
+    expected = pending.missing_fields[0] if pending.missing_fields else ""
+    if expected == "time":
+        return bool(
+            _resolve_time(text, allow_bare=True).present
+            or re.fullmatch(r"\s*(?:por\s+la\s+)?(?:manana|tarde|noche)\s*[.!?]?\s*", text)
+        )
+    if expected == "date":
+        return _extract_date(text, date.today()) is not None
+    return False
 
 
 def render_direct_result(kind: str, result: dict[str, Any]) -> str:
@@ -249,12 +294,21 @@ def render_direct_result(kind: str, result: dict[str, Any]) -> str:
         return f"Su último entrenamiento fue {workout.get('name') or 'una sesión'} el {workout.get('date')}, señor."
     if kind in {"reminders_today", "reminder_list", "reminder_search"}:
         items = list(result.get("items") or [])
+        scope = str(result.get("range") or "today")
+        label = {
+            "today": "hoy", "tomorrow": "mañana", "this_week": "esta semana",
+            "next_week": "la semana que viene",
+        }.get(scope, "ese periodo")
         if not items:
-            return "No tiene recordatorios para hoy, señor."
-        descriptions = [
-            f"{item.get('title')}{' a las ' + str(item.get('targetTime')) if item.get('targetTime') else ''}"
-            for item in items[:5]
-        ]
+            return f"No tiene recordatorios para {label}, señor."
+        descriptions = []
+        for item in items[:5]:
+            description = str(item.get("title") or "Recordatorio")
+            if item.get("targetTime"):
+                description += f" a las {item['targetTime']}"
+            if item.get("temporalState"):
+                description += f" ({item['temporalState']})"
+            descriptions.append(description)
         return "; ".join(descriptions) + ", señor."
     if kind == "reminder_create":
         return "Recordatorio creado, señor." if result.get("created") and result.get("verified") else "No se pudo guardar, señor."

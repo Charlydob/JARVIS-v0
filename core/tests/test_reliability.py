@@ -57,10 +57,37 @@ async def test_exact_reminder_create_resumes_pending_hour_and_executes_once(tmp_
     assert writes[0]["title"] == "clase de alemán"
     assert writes[0]["target_time"] == "18:00"
     assert writes[0]["idempotency_key"]
-    assert "route_domain=reminders route_operation=create missing_fields=time pending_action_created=true" in caplog.text
+    assert "route_domain=reminders route_operation=create" in caplog.text
+    assert "missing_fields=time pending_action_created=true" in caplog.text
     assert "pending_action_resumed=true" in caplog.text
     assert "tool=bookshell.reminders.create" in caplog.text
     assert "tool_success=true verification_success=true" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_complete_new_intent_cancels_incompatible_pending_action(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+
+    async def books_query(_arguments):
+        return {"found": True, "book": {"title": "Musashi", "currentPage": 33, "pages": 575}}
+
+    services.tools.register(Tool("bookshell_books_query", "query", {"type": "object"}, books_query))
+
+    async def collect(_chunk: str) -> None:
+        return None
+
+    first = await services.chat_stream({
+        "message": "Crea un recordatorio para hoy", "conversation_id": "pending-switch",
+        "turn_id": "pending-switch-1",
+    }, collect)
+    second = await services.chat_stream({
+        "message": "¿Qué libro estoy leyendo?", "conversation_id": "pending-switch",
+        "turn_id": "pending-switch-2",
+    }, collect)
+
+    assert first["message"] == "¿A qué hora, señor?"
+    assert "Musashi" in second["message"]
+    assert "pending-switch" not in services._pending_intents
 
 
 @pytest.mark.asyncio

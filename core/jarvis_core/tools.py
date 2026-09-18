@@ -142,7 +142,12 @@ class ToolRegistry:
             mode = "accounts" if re.search(r"\b(saldo|cuentas?)\b", normalized) else "latest"
             candidates.append(("bookshell_finance_query", {"mode": mode, "limit": 10}))
         if "bookshell_reminders_query" in available:
-            scope = "week" if re.search(r"\b(semana|week)\b", normalized) else "today"
+            scope = (
+                "next_week" if re.search(r"\b(semana que viene|proxima semana|next week)\b", normalized)
+                else "this_week" if re.search(r"\b(esta semana|this week|semana)\b", normalized)
+                else "tomorrow" if re.search(r"\b(manana|tomorrow)\b", normalized)
+                else "today"
+            )
             candidates.append(("bookshell_reminders_query", {"scope": scope}))
         if "bookshell_world_query" in available:
             candidates.append(("bookshell_world_query", {"scope": "all", "limit": 20}))

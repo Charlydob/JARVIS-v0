@@ -7,6 +7,7 @@ import re
 import tempfile
 import time
 import unicodedata
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -19,7 +20,7 @@ from edge_tts import VoicesManager
 from faster_whisper import WhisperModel
 from jarvis_core.config import CoreSettings
 from jarvis_core.feedback import FeedbackLearning
-from jarvis_core.intents import DirectIntent, continue_direct_intent, is_pending_followup, render_direct_result, route_direct_intent
+from jarvis_core.intents import DirectIntent, continue_direct_intent, is_pending_field_response, is_pending_followup, render_direct_result, route_direct_intent
 from jarvis_core.language import SessionLanguagePolicy, response_language
 from jarvis_core.storage import Storage
 from jarvis_core.tools import ToolRegistry
@@ -56,7 +57,7 @@ AUDIO_MIN_DURATION_MS = 500
 AUDIO_MIN_SPEECH_MS = 300
 AUDIO_MIN_RMS = 0.014
 TRANSCRIPT_REPEAT_WINDOW_S = 8.0
-PENDING_ACTION_TIMEOUT_S = 10 * 60
+PENDING_ACTION_TIMEOUT_S = 5 * 60
 REPAIR_PATTERN = re.compile(
     r"\b(revisa bien|compruebalo otra vez|comprueba otra vez|eso esta mal|"
     r"no es lo que te he pedido|acabas de crear|vuelve a consultar|revisalo otra vez)\b"
@@ -65,6 +66,18 @@ NOISE_TRANSCRIPTS = {
     "gracias por ver", "gracias por ver el video", "subtitulos", "musica", "silencio",
     "thank you for watching", "you", "bye",
 }
+
+
+@dataclass
+class PendingAction:
+    id: str
+    created_at: float
+    updated_at: float
+    expected_field: str
+    originating_turn: str
+    domain: str
+    operation: str
+    intent: DirectIntent
 
 
 def normalized_transcript(value: str) -> str:
@@ -301,8 +314,7 @@ class JarvisServices:
         self._recent_transcripts: dict[str, tuple[str, float]] = {}
         self._turn_results: dict[str, tuple[dict[str, Any], float]] = {}
         self._turn_inflight: dict[str, asyncio.Future[dict[str, Any]]] = {}
-        self._pending_intents: dict[str, DirectIntent] = {}
-        self._pending_intent_created: dict[str, float] = {}
+        self._pending_intents: dict[str, PendingAction] = {}
         self._recent_completed_intents: dict[str, tuple[DirectIntent, float]] = {}
         self._action_locks: dict[str, asyncio.Lock] = {}
         self._action_results: dict[str, str] = {}
@@ -310,6 +322,7 @@ class JarvisServices:
     async def status(self) -> dict[str, Any]:
         return {
             "version": "0.2.0",
+            "build_sha": self.settings.build_sha,
             "providers": {
                 "llm": f"ollama/{self.settings.ollama_model}",
                 "stt": f"faster-whisper/{self.settings.whisper_model}",
@@ -334,16 +347,17 @@ class JarvisServices:
             duration_ms = float(payload.get("duration_ms") or 0)
             speech_ms = float(payload.get("speech_ms") or 0)
             max_rms = float(payload.get("max_rms") or 0)
+            manual_finalize = bool(payload.get("manual_finalize"))
             LOGGER.info(
-                "utterance_id=%s audio_duration=%.0f speech_ms=%.0f rms=%.4f bytes=%d content_type=%s",
-                utterance_id, duration_ms, speech_ms, max_rms, len(raw), content_type,
+                "utterance_id=%s manual_finalize=%s audio_duration=%.0f speech_ms=%.0f rms=%.4f audio_bytes=%d content_type=%s",
+                utterance_id, str(manual_finalize).lower(), duration_ms, speech_ms, max_rms, len(raw), content_type,
             )
             discard_reason = None
             if duration_ms < AUDIO_MIN_DURATION_MS:
                 discard_reason = "audio_too_short"
-            elif speech_ms < AUDIO_MIN_SPEECH_MS:
+            elif not manual_finalize and speech_ms < AUDIO_MIN_SPEECH_MS:
                 discard_reason = "speech_too_short"
-            elif max_rms < AUDIO_MIN_RMS:
+            elif not manual_finalize and max_rms < AUDIO_MIN_RMS:
                 discard_reason = "energy_too_low"
             elif len(raw) < 1000:
                 discard_reason = "audio_too_small"
@@ -465,6 +479,7 @@ class JarvisServices:
         conversation_id = str(payload.get("conversation_id") or uuid4())
         turn_id = str(payload["turn_id"])
         total_started = time.perf_counter()
+        TOOL_LOGGER.info("turn_id=%s user_text=%r", turn_id, message)
         routing_started = time.perf_counter()
         local_now = datetime.now(ZoneInfo(os.getenv("JARVIS_BOOKSHELL_TIMEZONE", "Europe/Zurich")))
         today = local_now.date()
@@ -483,17 +498,24 @@ class JarvisServices:
                     "turn_id=%s repair_route=true force_fresh=true source=%r correction=%r",
                     turn_id, repair_source, message,
                 )
-        pending_created = self._pending_intent_created.get(conversation_id)
-        if pending_created is not None and time.monotonic() - pending_created > PENDING_ACTION_TIMEOUT_S:
+        pending = self._pending_intents.get(conversation_id)
+        if pending is not None and time.monotonic() - pending.updated_at > PENDING_ACTION_TIMEOUT_S:
             self._pending_intents.pop(conversation_id, None)
-            self._pending_intent_created.pop(conversation_id, None)
+            TOOL_LOGGER.info("turn_id=%s pending_action_expired=true pending_action_id=%s", turn_id, pending.id)
+            pending = None
         direct = route_direct_intent(routing_message, today, local_now)
         pending_resumed = False
-        if conversation_id in self._pending_intents and (
-            direct is None or (direct.kind == "reminder_create" and is_pending_followup(message))
-        ):
-            direct = continue_direct_intent(self._pending_intents[conversation_id], message, today, local_now)
+        if pending is not None and is_pending_field_response(pending.intent, message):
+            direct = continue_direct_intent(pending.intent, message, today, local_now)
             pending_resumed = direct is not None
+            pending.updated_at = time.monotonic()
+        elif pending is not None and direct is not None:
+            self._pending_intents.pop(conversation_id, None)
+            TOOL_LOGGER.info(
+                "turn_id=%s pending_action_cancelled=true pending_action_id=%s reason=new_complete_intent",
+                turn_id, pending.id,
+            )
+            pending = None
         elif direct is None and is_pending_followup(message):
             completed = self._recent_completed_intents.get(conversation_id)
             if completed and time.monotonic() - completed[1] <= 120:
@@ -505,10 +527,14 @@ class JarvisServices:
                     pending_resumed = True
         routed = direct
         if routed and routed.domain:
+            routed_arguments = routed.arguments or {}
+            date_range = routed_arguments.get("scope") or (
+                f"{routed_arguments.get('from', 'none')}..{routed_arguments.get('until', 'none')}"
+            )
             TOOL_LOGGER.info(
-                "turn_id=%s route_domain=%s route_operation=%s missing_fields=%s pending_action_resumed=%s",
+                "turn_id=%s route_domain=%s route_operation=%s date_range=%s missing_fields=%s pending_action_resumed=%s",
                 turn_id, routed.domain, routed.operation or "unknown",
-                ",".join(routed.missing_fields) or "none", str(pending_resumed).lower(),
+                date_range, ",".join(routed.missing_fields) or "none", str(pending_resumed).lower(),
             )
         # Complex reminder mutations remain on the existing tool-selection path after
         # their domain and operation have been classified. Direct execution is reserved
@@ -541,12 +567,22 @@ class JarvisServices:
                 answer = direct.clarification
                 if direct.kind == "reminder_create" and direct.arguments is not None:
                     direct.arguments.setdefault("idempotency_key", str(uuid4()))
-                self._pending_intents[conversation_id] = direct
-                self._pending_intent_created.setdefault(conversation_id, time.monotonic())
+                existing_pending = self._pending_intents.get(conversation_id)
+                now_pending = time.monotonic()
+                pending_action = PendingAction(
+                    id=existing_pending.id if existing_pending and pending_resumed else str(uuid4()),
+                    created_at=existing_pending.created_at if existing_pending and pending_resumed else now_pending,
+                    updated_at=now_pending,
+                    expected_field=direct.missing_fields[0] if direct.missing_fields else "unknown",
+                    originating_turn=existing_pending.originating_turn if existing_pending and pending_resumed else turn_id,
+                    domain=direct.domain or "unknown", operation=direct.operation or "unknown", intent=direct,
+                )
+                self._pending_intents[conversation_id] = pending_action
                 TOOL_LOGGER.info(
-                    "turn_id=%s route_domain=%s route_operation=%s missing_fields=%s pending_action_created=true",
+                    "turn_id=%s route_domain=%s route_operation=%s missing_fields=%s pending_action_created=true pending_action_id=%s expected_field=%s originating_turn=%s",
                     turn_id, direct.domain or "unknown", direct.operation or "unknown",
-                    ",".join(direct.missing_fields) or "none",
+                    ",".join(direct.missing_fields) or "none", pending_action.id,
+                    pending_action.expected_field, pending_action.originating_turn,
                 )
             elif direct.tool and direct.arguments is not None:
                 if not self.tools.has(direct.tool):
@@ -590,9 +626,14 @@ class JarvisServices:
                         (time.perf_counter() - tool_started) * 1000,
                     )
                     answer = render_direct_result(direct.kind, parsed if isinstance(parsed, dict) else {})
+                    if direct.domain == "reminders" and direct.operation in {"list", "search"}:
+                        TOOL_LOGGER.info(
+                            "turn_id=%s transformation=reminders_raw_to_temporal_items result_count=%s response_template=%s",
+                            turn_id, parsed.get("count", 0) if isinstance(parsed, dict) else "unknown",
+                            f"reminders_{parsed.get('range', 'custom')}_{'empty' if not parsed.get('count') else 'items'}" if isinstance(parsed, dict) else "reminders_error",
+                        )
                     if succeeded:
                         self._pending_intents.pop(conversation_id, None)
-                        self._pending_intent_created.pop(conversation_id, None)
                         if direct.kind == "reminder_create":
                             self._recent_completed_intents[conversation_id] = (direct, time.monotonic())
                         if len(self._action_results) > 200:

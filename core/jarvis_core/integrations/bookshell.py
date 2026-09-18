@@ -1,4 +1,6 @@
 import asyncio
+import json
+import logging
 import os
 import time
 from datetime import datetime, timedelta
@@ -10,6 +12,9 @@ import httpx
 
 from jarvis_core.tools import Tool, ToolRegistry
 from jarvis_core.integrations.bookshell_domains import BookShellDomains, register_domain_tools
+
+
+LOGGER = logging.getLogger("jarvis-core.bookshell.http")
 
 
 class BookShellClient:
@@ -24,6 +29,7 @@ class BookShellClient:
         self.timezone = timezone
         self.transport = transport
         self.headers = {"Authorization": f"Bearer {token}"} if token else {}
+        self.last_trace: dict[str, Any] = {}
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         async with httpx.AsyncClient(
@@ -33,8 +39,22 @@ class BookShellClient:
             timeout=httpx.Timeout(15.0, connect=5.0),
         ) as client:
             response = await client.request(method, path, **kwargs)
+            try:
+                raw_payload: Any = response.json()
+            except ValueError:
+                raw_payload = response.text
+            params = kwargs.get("params") or {}
+            self.last_trace = {
+                "request_path": path, "params": dict(params), "http_status": response.status_code,
+                "raw_response": raw_payload,
+            }
+            LOGGER.info(
+                "request_path=%s params=%s http_status=%s raw_response=%s",
+                path, json.dumps(dict(params), ensure_ascii=False), response.status_code,
+                json.dumps(raw_payload, ensure_ascii=False),
+            )
             response.raise_for_status()
-            return dict(response.json())
+            return dict(raw_payload)
 
     async def data(self, path: str) -> Any:
         return (await self._request("GET", f"/data/{path.strip('/')}" )).get("data")
