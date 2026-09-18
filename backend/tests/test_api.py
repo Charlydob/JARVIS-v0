@@ -108,6 +108,16 @@ def test_bad_feedback_requires_correction() -> None:
     assert response.status_code == 422
 
 
+def test_bad_feedback_accepts_structured_reason_without_fixed_correction() -> None:
+    with TestClient(app) as client:
+        response = client.post("/api/feedback", json={
+            "message_id": "message", "rating": "bad",
+            "reason_code": "should_have_used_tool",
+            "comment": "Consulta BOOKSHELL antes de responder.",
+        })
+    assert response.status_code != 422
+
+
 def test_stats_round_trip_through_connected_core() -> None:
     headers = {"Authorization": f"Bearer {settings.core_token}"}
     with TestClient(app) as client, client.websocket_connect("/internal/core/ws", headers=headers) as core:

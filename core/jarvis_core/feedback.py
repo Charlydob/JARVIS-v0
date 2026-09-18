@@ -12,6 +12,25 @@ from jarvis_core.storage import Storage
 LOGGER = logging.getLogger("jarvis-core.feedback")
 SemanticSelector = Callable[[str, list[dict[str, Any]]], Awaitable[list[str]] | list[str]]
 
+BEHAVIOR_REASONS = {
+    "should_have_used_tool", "wrong_tool", "action_not_executed",
+    "ignored_context", "repeated_response",
+}
+PREFERENCE_REASONS = {"too_long", "too_short", "wrong_tone"}
+
+
+def _domain(value: str) -> str:
+    normalized = _normalized(value)
+    rules = {
+        "reminders": r"\b(recordatori|recuerd|agenda|cita|dentista|clase)\w*\b",
+        "books": r"\b(libro|pagina|leyendo|lectura)\w*\b",
+        "gym": r"\b(gym|gimnasio|entren|ejercicio)\w*\b",
+        "habits": r"\b(habito|racha)\w*\b",
+        "finance": r"\b(gasto|saldo|cuenta|ingreso|finanz)\w*\b",
+        "notes": r"\b(nota|apunte)\w*\b",
+    }
+    return next((name for name, pattern in rules.items() if re.search(pattern, normalized)), "general")
+
 
 def _normalized(value: str) -> str:
     ascii_value = unicodedata.normalize("NFKD", value.lower()).encode("ascii", "ignore").decode()
@@ -72,16 +91,50 @@ class FeedbackLearning:
         if not selected:
             return None
         lines = [
-            "LEARNED USER PREFERENCES (only relevant past feedback; apply as guidance, not as fixed facts):"
+            "LEARNED RULES (guidance only; never copy an old response or treat feedback as current factual data):"
         ]
         for item in selected:
-            lines.append(f"- Similar request: {item['user_message']}")
+            reason_code = str(item.get("reason_code") or item.get("reason") or "")
+            domain = _domain(str(item["user_message"]))
+            feedback_kind = (
+                "behavior" if reason_code in BEHAVIOR_REASONS
+                else "preference" if reason_code in PREFERENCE_REASONS
+                else "factual"
+            )
+            LOGGER.info(
+                "feedback_kind=%s reason_code=%s domain=%s feedback_id=%s",
+                feedback_kind, reason_code or "none", domain, item["feedback_id"],
+            )
+            lines.append(f"- feedback_kind={feedback_kind}; domain={domain}; reason_code={reason_code or 'unspecified'}")
             if item["rating"] == "good":
-                lines.append(f"  The user approved this answer style/content: {item['assistant_response']}")
+                lines.append("  Preserve the successful style, but obtain dynamic facts again from tools.")
+                if item.get("comment"):
+                    lines.append(f"  Preference: {item['comment']}")
+            elif feedback_kind == "behavior":
+                if reason_code == "should_have_used_tool":
+                    lines.append(
+                        "  POLICY: For a factual request in this domain, call the configured BookShell read tool "
+                        "on every request and answer only from its fresh result. Never reuse the old answer."
+                    )
+                elif reason_code == "wrong_tool":
+                    lines.append("  POLICY: Re-evaluate the domain and operation, then use the matching configured tool.")
+                elif reason_code == "action_not_executed":
+                    lines.append("  POLICY: Do not claim completion until the requested action tool succeeds and is verified.")
+                elif reason_code == "ignored_context":
+                    lines.append("  POLICY: Resolve the request using the relevant preceding turn before routing it.")
+                elif reason_code == "repeated_response":
+                    lines.append("  POLICY: Re-query the source of truth instead of repeating a prior response.")
+                if item.get("expected_behavior"):
+                    lines.append(f"  Expected behavior: {item['expected_behavior']}")
+                elif item.get("comment"):
+                    lines.append(f"  Context: {item['comment']}")
+            elif feedback_kind == "preference":
+                preference = item.get("expected_behavior") or item.get("comment") or item.get("correction")
+                if preference:
+                    lines.append(f"  Style preference: {preference}")
             else:
-                lines.append(f"  Avoid this previous answer: {item['assistant_response']}")
-                if item.get("reason"):
-                    lines.append(f"  Reason: {item['reason']}")
-                if item.get("correction"):
-                    lines.append(f"  Prefer instead: {item['correction']}")
+                lines.append(f"  This previous answer was factually rejected: {item['assistant_response']}")
+                correction = item.get("expected_behavior") or item.get("correction") or item.get("comment")
+                if correction:
+                    lines.append(f"  Scoped correction: {correction}")
         return "\n".join(lines)

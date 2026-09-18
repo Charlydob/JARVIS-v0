@@ -147,7 +147,7 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         return DirectIntent("book_current", "bookshell_books_query", {"mode": "current", "limit": 1})
     if re.search(r"\b(?:cual|cuando|que)\b.*\b(?:ultimo|ultima)\b.*\b(?:entrenamiento|sesion)\b|\b(?:ultimo|ultima)\s+(?:entrenamiento|sesion)\b", text):
         return DirectIntent("gym_last", "bookshell_gym_query", {"mode": "last"}, domain="gym", operation="read")
-    reminder_topic = re.search(r"\b(recordatorio|recuerdame|clase|cita|dentista|guardia)\b", text)
+    reminder_topic = re.search(r"\b(recordatorios?|recuerdame|clase|cita|dentista|guardia)\b", text)
     creation = re.search(rf"\b{CREATE_PATTERN_NORMALIZED}\b", text)
     reminder_context = reminder_topic or re.search(r"\b(hoy|manana|lunes|martes|miercoles|jueves|viernes|sabado|domingo)\b", text)
 

@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -33,6 +34,8 @@ No menciones mansiones, desayunos ni detalles personales que el usuario no haya 
 Un saludo se responde con brevedad, sin añadir noticias, clima ni supuestos.
 No antepongas etiquetas de rol como «assistant», «user» o «JARVIS» a la respuesta.
 No afirmes que una acción externa se ejecutó salvo que recibas un resultado de tool explícitamente exitoso y verificado.
+La disponibilidad de capacidades viene únicamente de AVAILABLE TOOLS. Nunca inventes que tienes o no tienes permisos.
+Para datos dinámicos de BookShell, consulta siempre la herramienta de lectura; la memoria y respuestas previas no son fuente de verdad.
 Si necesitas información actual y no aparece en un contexto de herramienta, di claramente que no dispones de ella."""
 
 WEATHER_WORDS = ("tiempo", "clima", "lluv", "temperatura", "frío", "frio", "calor", "nubl", "pronóstico", "pronostico", "previsión", "prevision")
@@ -54,6 +57,10 @@ AUDIO_MIN_SPEECH_MS = 300
 AUDIO_MIN_RMS = 0.014
 TRANSCRIPT_REPEAT_WINDOW_S = 8.0
 PENDING_ACTION_TIMEOUT_S = 10 * 60
+REPAIR_PATTERN = re.compile(
+    r"\b(revisa bien|compruebalo otra vez|comprueba otra vez|eso esta mal|"
+    r"no es lo que te he pedido|acabas de crear|vuelve a consultar|revisalo otra vez)\b"
+)
 NOISE_TRANSCRIPTS = {
     "gracias por ver", "gracias por ver el video", "subtitulos", "musica", "silencio",
     "thank you for watching", "you", "bye",
@@ -401,7 +408,9 @@ class JarvisServices:
             return {"items": self.storage.memories(int(payload.get("limit", 50)))}
         if action == "feedback":
             feedback_id = self.storage.add_feedback(
-                str(payload["message_id"]), str(payload["rating"]), payload.get("correction"), payload.get("reason")
+                str(payload["message_id"]), str(payload["rating"]), payload.get("correction"), payload.get("reason"),
+                reason_code=payload.get("reason_code"), comment=payload.get("comment"),
+                expected_behavior=payload.get("expected_behavior"),
             )
             return {"id": feedback_id, "stored": True, "reward": 1 if payload["rating"] == "good" else -1}
         raise ValueError(f"Unsupported action: {action}")
@@ -459,11 +468,26 @@ class JarvisServices:
         routing_started = time.perf_counter()
         local_now = datetime.now(ZoneInfo(os.getenv("JARVIS_BOOKSHELL_TIMEZONE", "Europe/Zurich")))
         today = local_now.date()
+        previous = self.storage.conversation(conversation_id, limit=12)
+        routing_message = message
+        normalized_message = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode()
+        repair_source = None
+        if REPAIR_PATTERN.search(normalized_message):
+            repair_source = next(
+                (str(item.get("content", "")) for item in reversed(previous) if item.get("role") == "user"),
+                None,
+            )
+            if repair_source:
+                routing_message = repair_source
+                TOOL_LOGGER.info(
+                    "turn_id=%s repair_route=true force_fresh=true source=%r correction=%r",
+                    turn_id, repair_source, message,
+                )
         pending_created = self._pending_intent_created.get(conversation_id)
         if pending_created is not None and time.monotonic() - pending_created > PENDING_ACTION_TIMEOUT_S:
             self._pending_intents.pop(conversation_id, None)
             self._pending_intent_created.pop(conversation_id, None)
-        direct = route_direct_intent(message, today, local_now)
+        direct = route_direct_intent(routing_message, today, local_now)
         pending_resumed = False
         if conversation_id in self._pending_intents and (
             direct is None or (direct.kind == "reminder_create" and is_pending_followup(message))
@@ -498,6 +522,20 @@ class JarvisServices:
         user_language = self.languages.resolve(
             conversation_id, message, payload.get("language"), payload.get("language_confidence")
         )
+        tools_used: list[str] = []
+        tool_results: list[Any] = []
+        required_read = self.tools.required_read_name(routing_message)
+        if required_read and not self.tools.has(required_read):
+            answer = f"La capacidad técnica {required_read} no está configurada en el Core, señor."
+            TOOL_LOGGER.warning(
+                "turn_id=%s event=capability_unavailable tool=%s registry_state=missing",
+                turn_id, required_read,
+            )
+            await on_chunk(answer)
+            return self._store_chat_result(
+                conversation_id, message, answer, user_language, turn_id=turn_id,
+                tools_used=tools_used, tool_results=tool_results,
+            )
         if direct:
             if direct.clarification:
                 answer = direct.clarification
@@ -511,6 +549,13 @@ class JarvisServices:
                     ",".join(direct.missing_fields) or "none",
                 )
             elif direct.tool and direct.arguments is not None:
+                if not self.tools.has(direct.tool):
+                    answer = f"La capacidad técnica {direct.tool} no está configurada en el Core, señor."
+                    await on_chunk(answer)
+                    return self._store_chat_result(
+                        conversation_id, message, answer, user_language, turn_id=turn_id,
+                        tools_used=tools_used, tool_results=tool_results,
+                    )
                 tool_call_id = str(uuid4())
                 public_tool = "bookshell.reminders.create" if direct.tool == "bookshell_create_reminder" else direct.tool
                 execution_arguments = dict(direct.arguments)
@@ -523,6 +568,7 @@ class JarvisServices:
                 )
                 tool_started = time.perf_counter()
                 try:
+                    tools_used.append(direct.tool)
                     if action_key:
                         action_lock = self._action_locks.setdefault(action_key, asyncio.Lock())
                         async with action_lock:
@@ -531,6 +577,7 @@ class JarvisServices:
                     else:
                         raw_result = await self.tools.execute(direct.tool, execution_arguments)
                     parsed = json.loads(raw_result)
+                    tool_results.append({"tool": direct.tool, "result": parsed})
                     self._log_tool_timings(turn_id, tool_call_id, parsed)
                     succeeded = self._tool_succeeded(raw_result, direct.tool)
                     verification_succeeded = isinstance(parsed, dict) and parsed.get("verified") is True
@@ -562,15 +609,16 @@ class JarvisServices:
             else:
                 answer = "No he podido completar la solicitud, señor."
             await on_chunk(answer)
-            result = self._store_chat_result(conversation_id, message, answer, user_language)
+            result = self._store_chat_result(
+                conversation_id, message, answer, user_language, turn_id=turn_id,
+                tools_used=tools_used, tool_results=tool_results,
+            )
             PERFORMANCE_LOGGER.info(
                 "turn_id=%s stage=total duration_ms=%.1f path=direct", turn_id,
                 (time.perf_counter() - total_started) * 1000,
             )
             return result
         context_started = time.perf_counter()
-        previous = self.storage.conversation(conversation_id, limit=8)
-
         async def timed_context() -> str | None:
             started = time.perf_counter()
             result = await self._tool_context(message, payload.get("latitude"), payload.get("longitude"))
@@ -597,6 +645,16 @@ class JarvisServices:
             "Never invent a date, ID, duration or field the user did not provide."
         )
         context_parts = [language_context, date_context]
+        context_parts.append(
+            "AVAILABLE TOOLS (authoritative ToolRegistry state): "
+            + (", ".join(self.tools.names()) or "none")
+            + ". Do not claim any other capability or permission state."
+        )
+        if repair_source:
+            context_parts.append(
+                f"REPAIR TURN: Re-evaluate the prior request {repair_source!r}, force a fresh tool read, "
+                "and do not repeat the previous answer merely from conversation history."
+            )
         if feedback_context:
             context_parts.append(feedback_context)
         if context:
@@ -604,8 +662,7 @@ class JarvisServices:
         context = "\n".join(context_parts)
         conversation: list[dict[str, Any]] = [*previous, {"role": "user", "content": message}]
         routing_started = time.perf_counter()
-        routing_message = message
-        if len(re.findall(r"[^\W\d_]+", message, flags=re.UNICODE)) <= 3 and previous:
+        if not repair_source and len(re.findall(r"[^\W\d_]+", message, flags=re.UNICODE)) <= 3 and previous:
             routing_message = " ".join(str(item.get("content", "")) for item in previous[-2:]) + " " + message
         definitions = self.tools.definitions_for(routing_message)
         PERFORMANCE_LOGGER.info("turn_id=%s stage=tool_schema_selection duration_ms=%.1f tools=%d", turn_id, (time.perf_counter() - routing_started) * 1000, len(definitions))
@@ -620,6 +677,19 @@ class JarvisServices:
                 decision = await self.ollama.tool_decision(conversation, context, definitions)
                 PERFORMANCE_LOGGER.info("turn_id=%s stage=pre_llm duration_ms=%.1f", turn_id, (time.perf_counter() - decision_started) * 1000)
             tool_calls = list(decision.get("tool_calls") or [])
+            if not tool_calls:
+                forced_read = self.tools.fallback_read(routing_message, definitions)
+                if forced_read:
+                    forced_name, forced_arguments = forced_read
+                    TOOL_LOGGER.info(
+                        "turn_id=%s event=forced_fresh_read tool=%s reason=model_no_tool_call",
+                        turn_id, forced_name,
+                    )
+                    decision = {
+                        "role": "assistant",
+                        "tool_calls": [{"function": {"name": forced_name, "arguments": forced_arguments}}],
+                    }
+                    tool_calls = list(decision["tool_calls"])
             if tool_calls:
                 conversation.append(decision)
                 authoritative_results: list[str] = []
@@ -634,7 +704,13 @@ class JarvisServices:
                     TOOL_LOGGER.info("turn_id=%s tool_call_id=%s event=tool_requested tool=%s arguments=%s", turn_id, tool_call_id, name, json.dumps(arguments, ensure_ascii=False))
                     tool_started = time.perf_counter()
                     try:
+                        tools_used.append(name)
                         result = await self.tools.execute(name, arguments)
+                        try:
+                            stored_result: Any = json.loads(result)
+                        except json.JSONDecodeError:
+                            stored_result = result
+                        tool_results.append({"tool": name, "result": stored_result})
                         try:
                             self._log_tool_timings(turn_id, tool_call_id, json.loads(result))
                         except json.JSONDecodeError:
@@ -656,7 +732,10 @@ class JarvisServices:
                     answer = " ".join(dict.fromkeys(failure_messages))
                     await on_chunk(answer)
                     PERFORMANCE_LOGGER.info("stage=chat_total duration_ms=%.1f path=tool_failure", (time.perf_counter() - total_started) * 1000)
-                    return self._store_chat_result(conversation_id, message, answer, user_language)
+                    return self._store_chat_result(
+                        conversation_id, message, answer, user_language, turn_id=turn_id,
+                        tools_used=tools_used, tool_results=tool_results,
+                    )
                 conversation.append({
                     "role": "system",
                     "content": (
@@ -675,7 +754,10 @@ class JarvisServices:
                 if answer:
                     await on_chunk(answer)
                 PERFORMANCE_LOGGER.info("stage=chat_total duration_ms=%.1f path=tool_no_call", (time.perf_counter() - total_started) * 1000)
-                return self._store_chat_result(conversation_id, message, answer, user_language)
+                return self._store_chat_result(
+                    conversation_id, message, answer, user_language, turn_id=turn_id,
+                    tools_used=tools_used, tool_results=tool_results,
+                )
 
         chunks: list[str] = []
         ollama_started = time.perf_counter()
@@ -690,7 +772,10 @@ class JarvisServices:
         PERFORMANCE_LOGGER.info("turn_id=%s stage=%s_total duration_ms=%.1f", turn_id, ollama_stage, (time.perf_counter() - ollama_started) * 1000)
         answer = "".join(chunks).strip()
         PERFORMANCE_LOGGER.info("turn_id=%s stage=total duration_ms=%.1f path=%s", turn_id, (time.perf_counter() - total_started) * 1000, "tool" if definitions else "fast")
-        return self._store_chat_result(conversation_id, message, answer, user_language)
+        return self._store_chat_result(
+            conversation_id, message, answer, user_language, turn_id=turn_id,
+            tools_used=tools_used, tool_results=tool_results,
+        )
 
     @staticmethod
     def _tool_succeeded(result: str, tool_name: str = "") -> bool:
@@ -739,12 +824,29 @@ class JarvisServices:
         return bool(re.search(r"\b(cread[oa]|actualizad[oa]|guardad[oa]|eliminad[oa]|completad[oa]|created|updated|saved|deleted)\b", answer.casefold()))
 
     def _store_chat_result(
-        self, conversation_id: str, message: str, answer: str, fallback_language: str
+        self, conversation_id: str, message: str, answer: str, fallback_language: str, *,
+        turn_id: str | None = None, tools_used: list[str] | None = None,
+        tool_results: list[Any] | None = None,
     ) -> dict[str, Any]:
         answer = re.sub(r"^\s*assistant\s*:?\s*", "", answer, flags=re.IGNORECASE).strip()
         language = fallback_language
-        self.storage.add_message(conversation_id, "user", message)
-        message_id = self.storage.add_message(conversation_id, "assistant", answer)
+        normalized_message = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode()
+        if REPAIR_PATTERN.search(normalized_message):
+            previous = self.storage.conversation(conversation_id, limit=8)
+            previous_answer = next(
+                (str(item.get("content", "")) for item in reversed(previous) if item.get("role") == "assistant"),
+                "",
+            )
+            TOOL_LOGGER.info(
+                "turn_id=%s repair_completed=true response_changed=%s",
+                turn_id, str(previous_answer.strip() != answer).lower(),
+            )
+        available = self.tools.names()
+        self.storage.add_message(conversation_id, "user", message, turn_id=turn_id)
+        message_id = self.storage.add_message(
+            conversation_id, "assistant", answer, turn_id=turn_id,
+            tools_available=available, tools_used=tools_used or [], tool_results=tool_results or [],
+        )
         return {
             "message": answer,
             "provider": "ollama",

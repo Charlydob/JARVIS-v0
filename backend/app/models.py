@@ -37,11 +37,19 @@ class FeedbackRequest(BaseModel):
     rating: Literal["good", "bad"]
     correction: str | None = Field(default=None, max_length=16_000)
     reason: str | None = Field(default=None, max_length=64)
+    reason_code: Literal[
+        "incorrect_information", "should_have_used_tool", "wrong_tool",
+        "action_not_executed", "ignored_context", "repeated_response",
+        "too_long", "too_short", "wrong_tone", "other",
+    ] | None = None
+    comment: str | None = Field(default=None, max_length=16_000)
+    expected_behavior: str | None = Field(default=None, max_length=16_000)
 
     @model_validator(mode="after")
-    def correction_required_for_bad_rating(self) -> "FeedbackRequest":
-        if self.rating == "bad" and not (self.correction or "").strip():
-            raise ValueError("A correction is required when rating a response as bad")
+    def detail_required_for_bad_rating(self) -> "FeedbackRequest":
+        details = (self.reason_code, self.reason, self.correction, self.comment, self.expected_behavior)
+        if self.rating == "bad" and not any((value or "").strip() for value in details):
+            raise ValueError("A reason or correction is required when rating a response as bad")
         return self
 
 

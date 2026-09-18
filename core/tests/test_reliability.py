@@ -165,3 +165,64 @@ async def test_duplicate_turn_executes_write_once_and_twenty_turns_have_no_phant
     assert duplicate["message"] == "Anotado, señor."
     assert services.storage.stats()["messages"] == 40
     assert all(result["message"] for result in results)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_reminders_are_read_fresh_and_repair_requeries(tmp_path: Path, caplog) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+    state = {"items": [
+        {"id": "r1", "title": "Primero", "targetDate": "2026-09-18", "targetTime": "09:00"},
+        {"id": "r2", "title": "Segundo", "targetDate": "2026-09-18", "targetTime": "10:00"},
+    ], "reads": 0}
+
+    async def reminders_query(_arguments):
+        state["reads"] += 1
+        return {"items": list(state["items"]), "count": len(state["items"])}
+
+    services.tools.register(Tool(
+        "bookshell_reminders_query", "query", {"type": "object"}, reminders_query,
+    ))
+
+    async def collect(_chunk: str) -> None:
+        return None
+
+    caplog.set_level(logging.INFO, logger="jarvis-core.tools")
+    first = await services.chat_stream({
+        "message": "¿Qué recordatorios tengo hoy?", "conversation_id": "fresh",
+        "turn_id": "fresh-turn-1",
+    }, collect)
+    second = await services.chat_stream({
+        "message": "¿Qué recordatorios tengo hoy?", "conversation_id": "fresh",
+        "turn_id": "fresh-turn-2",
+    }, collect)
+    state["items"].append({"id": "r3", "title": "Tercero", "targetDate": "2026-09-18", "targetTime": "11:00"})
+    third = await services.chat_stream({
+        "message": "Revisa bien, debería haber tres.", "conversation_id": "fresh",
+        "turn_id": "fresh-turn-3",
+    }, collect)
+    state["items"].pop(0)
+    fourth = await services.chat_stream({
+        "message": "¿Qué recordatorios tengo hoy?", "conversation_id": "fresh",
+        "turn_id": "fresh-turn-4",
+    }, collect)
+
+    assert state["reads"] == 4
+    assert "Primero" in first["message"] and "Segundo" in second["message"]
+    assert "Tercero" in third["message"]
+    assert "Primero" not in fourth["message"] and "Tercero" in fourth["message"]
+    assert "repair_route=true force_fresh=true" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_missing_tool_reports_real_registry_state(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+
+    async def collect(_chunk: str) -> None:
+        return None
+
+    result = await services.chat_stream({
+        "message": "¿Qué recordatorios tengo hoy?", "turn_id": "missing-tool-turn",
+    }, collect)
+
+    assert "no está configurada en el Core" in result["message"]
+    assert "bookshell_reminders_query" in result["message"]

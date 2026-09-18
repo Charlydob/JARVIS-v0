@@ -44,6 +44,12 @@ class ToolRegistry:
     def definitions(self) -> list[dict[str, Any]]:
         return [tool.ollama_definition() for tool in self._tools.values()]
 
+    def names(self) -> list[str]:
+        return list(self._tools)
+
+    def has(self, name: str) -> bool:
+        return name in self._tools
+
     def definitions_for(self, message: str) -> list[dict[str, Any]]:
         """Narrow BookShell domains before model routing without choosing the action itself."""
         normalized = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode()
@@ -86,6 +92,62 @@ class ToolRegistry:
             if "bookshell_books_query" in self._tools:
                 return "bookshell_books_query", {"mode": "progress", "limit": 1}
         return None
+
+    def required_read_name(self, message: str) -> str | None:
+        """Return the real registry capability required by an explicit factual query."""
+        normalized = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode()
+        if re.search(r"\b(anad\w*|agreg\w*|cre\w*|apunt\w*|anot\w*|recuerdame|ponme|cambia|actualiza|cancela|elimina|borra|marca)\b", normalized):
+            return None
+        queries = (
+            (r"\b(recordatorios?|agenda|citas?)\b", "bookshell_reminders_query"),
+            (r"\b(libro|libros|pagina|leyendo|lectura)\b", "bookshell_books_query"),
+            (r"\b(gym|gimnasio|entrenamiento|ejercicio)\b", "bookshell_gym_query"),
+            (r"\b(habito|habitos|racha)\b", "bookshell_habits_query"),
+            (r"\b(gasto|saldo|cuenta|ingreso|finanzas?)\b", "bookshell_finance_query"),
+            (r"\b(nota|notas|apunte)\b", "bookshell_notes_query"),
+            (r"\b(receta|recetas|ingredientes)\b", "bookshell_recipes_query"),
+        )
+        return next((name for pattern, name in queries if re.search(pattern, normalized)), None)
+
+    def fallback_read(
+        self, message: str, definitions: list[dict[str, Any]]
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Guarantee a fresh BookShell read when a factual domain was recognized.
+
+        Ollama still chooses detailed arguments when it can. If it declines to call a
+        tool, this conservative fallback calls the domain's read endpoint rather than
+        allowing a cached or invented factual answer.
+        """
+        available = {
+            str(item.get("function", {}).get("name", ""))
+            for item in definitions
+        }
+        normalized = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode()
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        if "bookshell_books_query" in available:
+            candidates.append(("bookshell_books_query", {"mode": "progress", "limit": 1}))
+        if "bookshell_gym_query" in available:
+            mode = "exercise" if re.search(r"\b(ejercicio|press|peso|kilos?)\b", normalized) else "last"
+            arguments: dict[str, Any] = {"mode": mode, "limit": 10}
+            if mode == "exercise":
+                arguments["exercise"] = message
+            candidates.append(("bookshell_gym_query", arguments))
+        if "bookshell_habits_query" in available:
+            mode = "pending" if re.search(r"\b(pendiente|hoy)\b", normalized) else "list"
+            candidates.append(("bookshell_habits_query", {"mode": mode}))
+        if "bookshell_finance_query" in available:
+            mode = "accounts" if re.search(r"\b(saldo|cuentas?)\b", normalized) else "latest"
+            candidates.append(("bookshell_finance_query", {"mode": mode, "limit": 10}))
+        if "bookshell_reminders_query" in available:
+            scope = "week" if re.search(r"\b(semana|week)\b", normalized) else "today"
+            candidates.append(("bookshell_reminders_query", {"scope": scope}))
+        if "bookshell_world_query" in available:
+            candidates.append(("bookshell_world_query", {"scope": "all", "limit": 20}))
+        if "bookshell_notes_query" in available:
+            candidates.append(("bookshell_notes_query", {"limit": 10}))
+        if "bookshell_recipes_query" in available:
+            candidates.append(("bookshell_recipes_query", {"limit": 10}))
+        return candidates[0] if len(candidates) == 1 else None
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         tool = self._tools.get(name)

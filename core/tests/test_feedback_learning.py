@@ -27,7 +27,7 @@ def test_negative_feedback_injects_correction_and_not_old_answer(tmp_path: Path)
 
     context = asyncio.run(FeedbackLearning(storage, selector).context_for("Sintetiza este email profesional"))
     assert context is not None
-    assert "Avoid this previous answer" in context
+    assert "factually rejected" in context
     assert "Dar tres viñetas breves" in context
 
 
@@ -38,5 +38,30 @@ def test_positive_feedback_is_used_as_an_approved_example(tmp_path: Path) -> Non
     context = asyncio.run(FeedbackLearning(storage, lambda *_: [feedback_id]).context_for("Dame los buenos días"))
 
     assert context is not None
-    assert "approved this answer" in context
-    assert "Buenos días, señor." in context
+    assert "successful style" in context
+    assert "dynamic facts again from tools" in context
+
+
+def test_tool_feedback_is_recovered_as_policy_not_fixed_answer(tmp_path: Path, caplog) -> None:
+    storage = Storage(tmp_path / "memory.db")
+    conversation = "reminders-feedback"
+    storage.add_message(conversation, "user", "¿Qué recordatorios tengo hoy?")
+    message_id = storage.add_message(
+        conversation, "assistant", "Tiene dos recordatorios hoy, señor.", turn_id="turn-feedback-1",
+        tools_available=["bookshell_reminders_query"], tools_used=[], tool_results=[],
+    )
+    feedback_id = storage.add_feedback(
+        message_id, "bad", reason_code="should_have_used_tool",
+        comment="Consulta BOOKSHELL antes de responder.",
+    )
+
+    caplog.set_level("INFO", logger="jarvis-core.feedback")
+    context = asyncio.run(FeedbackLearning(storage, lambda *_: [feedback_id]).context_for(
+        "¿Tengo algún recordatorio para hoy?"
+    ))
+
+    assert context is not None
+    assert "POLICY:" in context
+    assert "call the configured BookShell read tool" in context
+    assert "Tiene dos recordatorios" not in context
+    assert "feedback_kind=behavior" in caplog.text
