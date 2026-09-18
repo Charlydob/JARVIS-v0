@@ -1,7 +1,6 @@
 import {
   useEffect,
-  useRef,
-  useState
+  useRef
 } from 'react'
 
 import type { JarvisState } from '../../state/machine'
@@ -14,12 +13,12 @@ import type { FaceElements } from './animations/types'
 import { startIdleAnimation } from './animations/idle'
 import { startListeningAnimation } from './animations/listening'
 import {
-  runThinkingAnimation,
-  THINKING_EXIT_DURATION
+  runThinkingAnimation
 } from './animations/thinking'
 import { startSpeakingAnimation } from './animations/speaking'
 import { startSleepingAnimation } from './animations/sleeping'
 import { startErrorAnimation } from './animations/error'
+import { resetFaceToCanonicalState } from './animations/canonical'
 
 type Props = {
   state: JarvisState
@@ -48,54 +47,7 @@ export function JarvisFace({
   const mouthRef =
     useRef<SVGRectElement | null>(null)
 
-  /*
-    Estado visual independiente del estado lógico.
-
-    Esto permite que THINKING pueda frenar y
-    regresar a la cara antes de empezar SPEAKING.
-  */
-  const [visualState, setVisualState] =
-    useState<JarvisState>(state)
-
-  const pendingStateRef =
-    useRef<JarvisState>(state)
-
-  const thinkingAbortRef =
-    useRef<AbortController | null>(null)
-
-  const exitTimerRef =
-    useRef<number | null>(null)
-
-  /*
-    Sincronizar estado lógico → estado visual.
-  */
-  useEffect(() => {
-    pendingStateRef.current = state
-
-    if (
-      visualState === 'thinking' &&
-      state !== 'thinking'
-    ) {
-      thinkingAbortRef.current?.abort()
-
-      if (exitTimerRef.current === null) {
-        exitTimerRef.current =
-          window.setTimeout(() => {
-            exitTimerRef.current = null
-
-            setVisualState(
-              pendingStateRef.current
-            )
-          }, THINKING_EXIT_DURATION)
-      }
-
-      return
-    }
-
-    if (visualState !== state) {
-      setVisualState(state)
-    }
-  }, [state, visualState])
+  const stopAnimationRef = useRef<(() => void) | null>(null)
 
   /*
     Ejecutar la animación correspondiente
@@ -118,71 +70,53 @@ export function JarvisFace({
       mouth: mouthRef.current
     }
 
-    if (visualState === 'thinking') {
+    stopAnimationRef.current?.()
+    resetFaceToCanonicalState(elements, state)
+
+    let stopped = false
+    let stop: () => void
+
+    if (state === 'thinking') {
       const controller =
         new AbortController()
-
-      thinkingAbortRef.current =
-        controller
-
       void runThinkingAnimation(
         elements,
         controller.signal
       )
-
-      return () => {
-        if (!controller.signal.aborted) {
-          controller.abort()
-        }
-      }
-    }
-
-    if (visualState === 'listening') {
-      return startListeningAnimation(elements)
-    }
-
-    if (visualState === 'speaking') {
-      return startSpeakingAnimation(
+      stop = () => controller.abort()
+    } else if (state === 'listening') {
+      stop = startListeningAnimation(elements)
+    } else if (state === 'speaking') {
+      stop = startSpeakingAnimation(
         elements,
         playing
       )
+    } else if (state === 'sleeping' || state === 'muted') {
+      stop = startSleepingAnimation(elements)
+    } else if (state === 'error') {
+      stop = startErrorAnimation(elements)
+    } else {
+      stop = startIdleAnimation(elements)
     }
 
-    if (visualState === 'sleeping') {
-      return startSleepingAnimation(elements)
+    const stopCurrent = () => {
+      if (stopped) return
+      stopped = true
+      stop()
+      resetFaceToCanonicalState(elements, state)
     }
-
-    if (visualState === 'muted') {
-      return startSleepingAnimation(elements)
-    }
-
-    if (visualState === 'error') {
-      return startErrorAnimation(elements)
-    }
-
-    return startIdleAnimation(elements)
-  }, [visualState, playing])
-
-  /*
-    Limpieza al desmontar.
-  */
-  useEffect(() => {
+    stopAnimationRef.current = stopCurrent
     return () => {
-      thinkingAbortRef.current?.abort()
-
-      if (exitTimerRef.current !== null) {
-        window.clearTimeout(
-          exitTimerRef.current
-        )
-      }
+      stopCurrent()
+      if (stopAnimationRef.current === stopCurrent) stopAnimationRef.current = null
     }
-  }, [])
+  }, [state, playing])
 
   return (
     <div
       className={[
         'jarvis-face',
-        `jarvis-face--${visualState}`,
+        `jarvis-face--${state}`,
         voiceEnabled
           ? ''
           : 'jarvis-face--voice-muted'

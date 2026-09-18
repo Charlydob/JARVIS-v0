@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import { ArrowLeft, Check, Cookie, History, Menu, Send, Volume2, VolumeX, X } from 'lucide-react'
+import { ArrowLeft, Check, Cookie, Copy, History, Menu, Send, Volume2, VolumeX, X } from 'lucide-react'
 import {
   getHistory,
   getStats,
@@ -19,6 +19,7 @@ import type { AudioCaptureMetadata } from './api/client'
 import { JarvisState, stateLabels, transition } from './state/machine'
 import { takeSpeechSegments } from './speech'
 import { PrefetchedSpeechQueue } from './speechQueue'
+import { copyPlainText, formatHistorySelection } from './historyExport'
 
 type View = 'face' | 'dashboard'
 
@@ -121,7 +122,10 @@ export default function App() {
   const [latestResponse, setLatestResponse] = useState<{ id: string; rating: 'good' | 'bad' | null } | null>(null)
   const [badMessage, setBadMessage] = useState<string | null>(null)
   const [correction, setCorrection] = useState('')
-  const [feedbackReason, setFeedbackReason] = useState('incorrect')
+  const [feedbackComment, setFeedbackComment] = useState('')
+  const [feedbackReason, setFeedbackReason] = useState('incorrect_information')
+  const [selectionMode, setSelectionMode] = useState(false)
+  const [selectedMessages, setSelectedMessages] = useState<Set<string>>(() => new Set())
   const conversationId = useRef<string>()
   const sessionLanguage = useRef('es')
   const noticeRef = useRef<HTMLParagraphElement>(null)
@@ -384,39 +388,75 @@ export default function App() {
     if (rating === 'bad') {
       setBadMessage(messageId)
       setCorrection('')
-      setFeedbackReason('incorrect')
+      setFeedbackComment('')
+      setFeedbackReason('incorrect_information')
       return
     }
-    await sendFeedback(messageId, rating, undefined, 'perfect')
+    await sendFeedback(messageId, rating)
     setLatestResponse((current) => current?.id === messageId ? { ...current, rating } : current)
     await refreshHistory()
   }
 
   const submitCorrection = async (event: FormEvent) => {
     event.preventDefault()
-    if (!badMessage || !correction.trim()) return
-    await sendFeedback(badMessage, 'bad', correction.trim(), feedbackReason)
+    if (!badMessage) return
+    await sendFeedback(badMessage, 'bad', {
+      reasonCode: feedbackReason,
+      comment: feedbackComment.trim() || undefined,
+      expectedBehavior: correction.trim() || undefined,
+    })
     setLatestResponse((current) => current?.id === badMessage ? { ...current, rating: 'bad' } : current)
     setBadMessage(null)
     setCorrection('')
+    setFeedbackComment('')
     await refreshHistory()
+  }
+
+  const toggleHistorySelection = (messageId: string) => {
+    setSelectedMessages((current) => {
+      const next = new Set(current)
+      if (next.has(messageId)) next.delete(messageId)
+      else next.add(messageId)
+      return next
+    })
+  }
+
+  const copyHistory = async (items: HistoryItem[]) => {
+    if (!items.length) return
+    try {
+      await copyPlainText(formatHistorySelection(items))
+      setNotice(`${items.length} mensajes copiados`)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'No se pudo copiar la conversación')
+    }
+  }
+
+  const closeSelection = () => {
+    setSelectionMode(false)
+    setSelectedMessages(new Set())
   }
 
   const correctionDialog = badMessage && (
     <div className="dialog-backdrop" onMouseDown={() => setBadMessage(null)}>
       <form className="correction-dialog" onSubmit={submitCorrection} onMouseDown={(event) => event.stopPropagation()}>
         <button type="button" className="dialog-close" onClick={() => setBadMessage(null)}><X size={18} /></button>
-        <h2>¿Qué debería haber respondido?</h2>
-        <p>La corrección se guardará en el PC para futuros datos de entrenamiento.</p>
+        <h2>¿Por qué estuvo mal?</h2>
+        <p>Se guardará la causa, el contexto y las tools del turno como dato de entrenamiento.</p>
         <select value={feedbackReason} onChange={(event) => setFeedbackReason(event.target.value)} aria-label="Motivo del feedback">
-          <option value="incorrect">Incorrecta</option>
-          <option value="too_long">Demasiado larga</option>
-          <option value="not_useful">Poco útil</option>
-          <option value="tone">Tono inadecuado</option>
-          <option value="other">Otro motivo</option>
+          <option value="incorrect_information">Información incorrecta</option>
+          <option value="should_have_used_tool">Debería haber consultado una tool</option>
+          <option value="wrong_tool">Utilizó la tool equivocada</option>
+          <option value="action_not_executed">No ejecutó la acción solicitada</option>
+          <option value="ignored_context">Ignoró el contexto</option>
+          <option value="repeated_response">Repitió una respuesta anterior</option>
+          <option value="too_long">Demasiado largo</option>
+          <option value="too_short">Demasiado corto</option>
+          <option value="wrong_tone">Tono incorrecto</option>
+          <option value="other">Otro</option>
         </select>
-        <textarea autoFocus value={correction} onChange={(event) => setCorrection(event.target.value)} rows={5} />
-        <button className="save-button" disabled={!correction.trim()}>Guardar corrección</button>
+        <textarea autoFocus value={feedbackComment} onChange={(event) => setFeedbackComment(event.target.value)} rows={3} placeholder="Comentario opcional" />
+        <textarea value={correction} onChange={(event) => setCorrection(event.target.value)} rows={4} placeholder="¿Qué debería haber hecho? (opcional)" />
+        <button className="save-button">Guardar feedback</button>
       </form>
     </div>
   )
@@ -426,9 +466,18 @@ export default function App() {
       <>
       <main className="dashboard">
         <header className="dashboard-header">
-          <button className="plain-button" onClick={() => setView('face')}><ArrowLeft size={18} /> Volver</button>
+          <button className="plain-button" onClick={() => { closeSelection(); setView('face') }}><ArrowLeft size={18} /> Volver</button>
           <div><h1>Conversaciones</h1><p>{coreOnline ? 'Core conectado' : 'Core desconectado'}</p></div>
+          <button className="plain-button history-select-button" onClick={() => selectionMode ? closeSelection() : setSelectionMode(true)}>{selectionMode ? 'Cancelar' : 'Seleccionar'}</button>
         </header>
+
+        {selectionMode && (
+          <section className="history-selection" aria-label="Acciones de selección">
+            <span>{selectedMessages.size} seleccionados</span>
+            <button disabled={!selectedMessages.size} onClick={() => void copyHistory(history.filter((item) => selectedMessages.has(item.id)))}><Copy size={15} /> Copiar</button>
+            <button onClick={() => void copyHistory(history.filter((item) => sameLocalDay(new Date(item.created_at), new Date())))}><Copy size={15} /> Copiar conversación completa de hoy</button>
+          </section>
+        )}
 
         <section className="history-stats" aria-label="Estadísticas persistentes">
           <span><strong>{stats.messages}</strong> Mensajes</span>
@@ -444,13 +493,25 @@ export default function App() {
               <summary><span>{group.label}</span><small>{group.items.length} mensajes</small></summary>
               <div className="history-day-items">
                 {group.items.map((item) => (
-                  <article key={item.id} className={`history-item history-item--${item.role}`}>
+                  <article
+                    key={item.id}
+                    className={`history-item history-item--${item.role} ${selectedMessages.has(item.id) ? 'history-item--selected' : ''}`}
+                    onClick={() => selectionMode && toggleHistorySelection(item.id)}
+                    role={selectionMode ? 'checkbox' : undefined}
+                    aria-checked={selectionMode ? selectedMessages.has(item.id) : undefined}
+                    tabIndex={selectionMode ? 0 : undefined}
+                    onKeyDown={(event) => {
+                      if (selectionMode && (event.key === 'Enter' || event.key === ' ')) {
+                        event.preventDefault(); toggleHistorySelection(item.id)
+                      }
+                    }}
+                  >
                     <small>{item.role === 'user' ? 'Tú' : 'JARVIS'} · {new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small>
                     <p>{item.role === 'assistant' ? cleanAssistantText(item.content) : item.content}</p>
                     {item.role === 'assistant' && (
                       <div className="feedback">
-                        <button className={item.rating === 'good' ? 'selected' : ''} onClick={() => void rate(item.id, 'good')} aria-label="Recompensa positiva, más uno"><Cookie size={15} /></button>
-                        <button className={item.rating === 'bad' ? 'selected' : ''} onClick={() => void rate(item.id, 'bad')} aria-label="Recompensa negativa, menos uno"><WhipIcon /></button>
+                        <button className={item.rating === 'good' ? 'selected' : ''} onClick={(event) => { event.stopPropagation(); void rate(item.id, 'good') }} aria-label="Recompensa positiva, más uno"><Cookie size={15} /></button>
+                        <button className={item.rating === 'bad' ? 'selected' : ''} onClick={(event) => { event.stopPropagation(); void rate(item.id, 'bad') }} aria-label="Recompensa negativa, menos uno"><WhipIcon /></button>
                         {item.correction && <span><Check size={13} /> Corrección guardada</span>}
                       </div>
                     )}

@@ -24,6 +24,9 @@ export interface HistoryItem {
   reward: 1 | -1 | null
   reason: string | null
   correction: string | null
+  reason_code: string | null
+  comment: string | null
+  expected_behavior: string | null
 }
 
 export interface ConversationStats {
@@ -158,10 +161,21 @@ export async function getStats(): Promise<ConversationStats> {
   return (await checked(await fetch(`${apiUrl}/api/stats`, { cache: 'no-store' }))).json() as Promise<ConversationStats>
 }
 
-export async function sendFeedback(messageId: string, rating: 'good' | 'bad', correction?: string, reason?: string): Promise<void> {
+export interface FeedbackDetails {
+  reasonCode?: string
+  comment?: string
+  expectedBehavior?: string
+}
+
+export async function sendFeedback(
+  messageId: string, rating: 'good' | 'bad', details: FeedbackDetails = {}
+): Promise<void> {
   await checked(await fetch(`${apiUrl}/api/feedback`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message_id: messageId, rating, correction, reason })
+    body: JSON.stringify({
+      message_id: messageId, rating, reason_code: details.reasonCode,
+      comment: details.comment, expected_behavior: details.expectedBehavior,
+    })
   }))
 }

@@ -26,12 +26,17 @@ const easeOut = (t: number) =>
 
 function animate(
   duration: number,
-  callback: (progress: number, elapsed: number) => void
+  callback: (progress: number, elapsed: number) => void,
+  signal?: AbortSignal
 ) {
   return new Promise<void>((resolve) => {
     const start = performance.now()
 
     function frame(now: number) {
+      if (signal?.aborted) {
+        resolve()
+        return
+      }
       const elapsed = now - start
       const progress = Math.min(elapsed / duration, 1)
 
@@ -262,10 +267,9 @@ export async function runThinkingAnimation(
       lerp(idle.mouth.ry, target.mouth.r, t)
     )
 
-  })
+  }, signal)
 
   if (signal.aborted) {
-    await returnToIdle(elements, idle)
     return
   }
 
@@ -361,6 +365,10 @@ export async function runThinkingAnimation(
     const start = performance.now()
 
     function frame(now: number) {
+      if (signal.aborted) {
+        resolve()
+        return
+      }
       const elapsed = now - start
 
       rotations.mouth =
@@ -376,16 +384,13 @@ export async function runThinkingAnimation(
 
       drawOrbit()
 
-      if (signal.aborted) {
-        resolve()
-        return
-      }
-
       requestAnimationFrame(frame)
     }
 
     requestAnimationFrame(frame)
   })
+
+  if (signal.aborted) return
 
   /* FRENADA */
 
@@ -414,11 +419,13 @@ export async function runThinkingAnimation(
       extraRotation * t
 
     drawOrbit()
-  })
+  }, signal)
+
+  if (signal.aborted) return
 
   /* PUNTOS → CARA */
 
-  await returnToIdle(elements, idle)
+  await returnToIdle(elements, idle, signal)
 }
 
 async function returnToIdle(
@@ -434,7 +441,8 @@ async function returnToIdle(
       rx: number
       ry: number
     }
-  }
+  },
+  signal?: AbortSignal
 ) {
   const leftStart = {
     x: n(leftEye, 'cx'),
@@ -525,7 +533,9 @@ async function returnToIdle(
         t
       )
     )
-  })
+  }, signal)
+
+  if (signal?.aborted) return
 
   setCircle(
     leftEye,
