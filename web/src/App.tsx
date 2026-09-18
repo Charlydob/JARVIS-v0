@@ -13,7 +13,9 @@ import {
 } from './api/client'
 import type { UserLocation } from './api/client'
 import { JarvisFace } from './components/jarvis-face/JarvisFace'
-import { useContinuousVoice } from './hooks/useContinuousVoice'
+import { beginSpeechPlayback, useContinuousVoice } from './hooks/useContinuousVoice'
+import type { VoiceUtteranceLifecycle } from './hooks/useContinuousVoice'
+import type { AudioCaptureMetadata } from './api/client'
 import { JarvisState, stateLabels, transition } from './state/machine'
 import { takeSpeechSegments } from './speech'
 import { PrefetchedSpeechQueue } from './speechQueue'
@@ -44,13 +46,6 @@ function cleanAssistantText(value: string) {
 const speechAudio = new Audio()
 speechAudio.preload = 'auto'
 let speechUnlocked = false
-
-function resetIOSAudioRoute() {
-  const session = (navigator as Navigator & { audioSession?: { type: string } }).audioSession
-  if (!session) return
-  session.type = 'playback'
-  session.type = 'auto'
-}
 
 function silentWav(): Blob {
   const sampleRate = 8000
@@ -88,13 +83,23 @@ async function unlockSpeech(): Promise<boolean> {
 function playAudio(blob: Blob, onPlayback: (playing: boolean) => void): Promise<void> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(blob)
-    resetIOSAudioRoute()
+    const restoreCapture = beginSpeechPlayback()
+    let settled = false
+    const finish = (error?: unknown) => {
+      if (settled) return
+      settled = true
+      onPlayback(false)
+      restoreCapture()
+      URL.revokeObjectURL(url)
+      if (error) reject(error)
+      else resolve()
+    }
     speechAudio.pause()
     speechAudio.src = url
     speechAudio.volume = 1
-    speechAudio.onended = () => { onPlayback(false); URL.revokeObjectURL(url); resolve() }
-    speechAudio.onerror = () => { onPlayback(false); speechUnlocked = false; URL.revokeObjectURL(url); reject(new Error('No se pudo reproducir la voz')) }
-    speechAudio.play().then(() => onPlayback(true)).catch((error) => { onPlayback(false); speechUnlocked = false; URL.revokeObjectURL(url); reject(error) })
+    speechAudio.onended = () => finish()
+    speechAudio.onerror = () => { speechUnlocked = false; finish(new Error('No se pudo reproducir la voz')) }
+    speechAudio.play().then(() => onPlayback(true)).catch((error) => { speechUnlocked = false; finish(error) })
   })
 }
 
@@ -211,7 +216,10 @@ export default function App() {
     if (noticeRef.current) noticeRef.current.scrollTop = noticeRef.current.scrollHeight
   }, [notice])
 
-  const runConversation = useCallback(async (message: string, language?: string, languageConfidence?: number, requestedTurnId?: string) => {
+  const runConversation = useCallback(async (
+    message: string, language?: string, languageConfidence?: number, requestedTurnId?: string,
+    onSpeaking?: () => void,
+  ) => {
     const cleanMessage = message.trim()
     if (!cleanMessage || !coreOnline) return
     if (activeTurnRef.current) return
@@ -245,6 +253,7 @@ export default function App() {
         if (!responseStarted) {
           responseStarted = true
           dispatch({ type: 'RESPONSE' })
+          if (shouldSpeak) onSpeaking?.()
         }
         if (shouldSpeak) {
           speechBuffer += chunk
@@ -298,14 +307,23 @@ export default function App() {
     setNotice(next ? 'Voz activada. Estoy escuchando.' : 'Voz silenciada. Seguiré respondiendo por texto.')
   }
 
-  const processAudio = useCallback(async (audio: Blob, metadata: { durationMs: number; speechMs: number; maxRms: number }) => {
+  const processAudio = useCallback(async (
+    audio: Blob, metadata: AudioCaptureMetadata, lifecycle: VoiceUtteranceLifecycle,
+  ) => {
     if (processingAudioRef.current) return
     processingAudioRef.current = true
-    const utteranceId = crypto.randomUUID()
+    const utteranceId = metadata.utteranceId
     dispatch({ type: 'SUBMIT' })
     setNotice('Transcribiendo…')
     try {
       const transcription = await transcribeAudio(audio, metadata, utteranceId, conversationId.current)
+      console.info('[JARVIS voice]', {
+        utterance_id: utteranceId,
+        event: 'transcript',
+        transcript: transcription.transcript,
+        discard_reason: transcription.discardReason ?? 'none',
+      })
+      lifecycle.processing()
       if (!transcription.transcript) {
         setNotice('Estoy escuchando')
         dispatch({ type: 'EMPTY_AUDIO' })
@@ -319,7 +337,10 @@ export default function App() {
         return
       }
       recentTranscriptRef.current = { text: normalized, at: Date.now() }
-      await runConversation(transcription.transcript, transcription.language, transcription.languageConfidence, crypto.randomUUID())
+      await runConversation(
+        transcription.transcript, transcription.language, transcription.languageConfidence,
+        crypto.randomUUID(), lifecycle.speaking,
+      )
     } catch (error) {
       console.warn('No se pudo transcribir la grabación', error)
       setNotice('No he podido entenderte. Sigo escuchando.')
@@ -333,7 +354,7 @@ export default function App() {
     enabled: coreOnline && !muted && view === 'face' && state !== 'error',
     paused: busy,
     onListening: useCallback(() => dispatch({ type: 'START_LISTENING' }), []),
-    onUtterance: useCallback((audio, metadata) => processAudio(audio, metadata), [processAudio]),
+    onUtterance: useCallback((audio, metadata, lifecycle) => processAudio(audio, metadata, lifecycle), [processAudio]),
     onError: useCallback((message) => { setNotice(message); dispatch({ type: 'FAIL' }) }, [])
   })
 
