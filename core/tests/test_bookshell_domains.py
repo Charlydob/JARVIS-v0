@@ -25,10 +25,20 @@ class FakeClient:
         if parts[:3] == ["gym", "gym", "workouts"]:
             root = self.values.setdefault("gym/gym", {})
             root.setdefault("workouts", {}).setdefault(parts[3], {})[parts[4]] = value
+        if parts[0] == "world":
+            self.values.setdefault("world", {}).setdefault(parts[1], {})[parts[2]] = value
+        if parts[:2] == ["recipes", "items"]:
+            self.values.setdefault("recipes/items", {})[parts[2]] = value
         return {"ok": True}
 
     async def patch_data(self, path: str, value: Any) -> dict[str, Any]:
-        self.writes.append(("patch", path, value)); return {"ok": True}
+        self.writes.append(("patch", path, value))
+        parts = path.split("/")
+        if parts[0] == "world":
+            self.values.setdefault("world", {}).setdefault(parts[1], {}).setdefault(parts[2], {}).update(value)
+        if parts[:2] == ["recipes", "items"]:
+            self.values.setdefault("recipes/items", {}).setdefault(parts[2], {}).update(value)
+        return {"ok": True}
 
     async def _request(self, _method: str, _path: str, **_kwargs: Any) -> dict[str, Any]:
         if _path == "/jarvis/habits/mark":
@@ -99,7 +109,7 @@ def test_world_note_and_recipe_writes_use_existing_data_paths() -> None:
     note = asyncio.run(domains.notes_write({"action": "create", "title": "Fixture", "content": "Text"}))
     recipe = asyncio.run(domains.recipes_write({"action": "create", "title": "Fixture recipe"}))
     assert world["created"] and note["created"] and recipe["created"]
-    assert note["verified"] is True
+    assert world["verified"] is True and note["verified"] is True and recipe["verified"] is True
     assert [path.split("/")[0] for _, path, _ in client.writes] == ["world", "notes", "recipes"]
 
 

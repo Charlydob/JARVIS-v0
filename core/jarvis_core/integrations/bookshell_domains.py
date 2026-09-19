@@ -368,14 +368,20 @@ class BookShellDomains:
             item_id = str(arguments.get("item_id") or "")
             if not item_id:
                 return {"updated": False, "clarificationRequired": True, "message": "Falta el ID del lugar."}
-            await self.client.patch_data(f"world/{scope}/{item_id}", {**allowed, "updatedAt": now})
-            return {"updated": True, "id": item_id}
+            write_started = time.perf_counter(); await self.client.patch_data(f"world/{scope}/{item_id}", {**allowed, "updatedAt": now}); write_ms = (time.perf_counter() - write_started) * 1000
+            readback_started = time.perf_counter(); persisted = await self.client.data("world") or {}; readback_ms = (time.perf_counter() - readback_started) * 1000
+            saved = (persisted.get(scope) or {}).get(item_id)
+            verified = bool(saved) and all(saved.get(key) == value for key, value in allowed.items())
+            return {"updated": verified, "verified": verified, "id": item_id, "item": saved, "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}}
         if not allowed.get("name") and not allowed.get("address"):
             return {"created": False, "clarificationRequired": True, "message": "¿Qué lugar debo guardar?"}
         item_id = f"jarvis_{uuid4()}"
         item = {"id": item_id, "kind": scope, **allowed, "createdAt": now, "updatedAt": now}
-        await self.client.put_data(f"world/{scope}/{item_id}", item)
-        return {"created": True, "item": item}
+        write_started = time.perf_counter(); await self.client.put_data(f"world/{scope}/{item_id}", item); write_ms = (time.perf_counter() - write_started) * 1000
+        readback_started = time.perf_counter(); persisted = await self.client.data("world") or {}; readback_ms = (time.perf_counter() - readback_started) * 1000
+        saved = (persisted.get(scope) or {}).get(item_id)
+        verified = bool(saved)
+        return {"created": verified, "verified": verified, "item": saved or item, "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}}
 
     async def notes_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
         notes = await self.client.data("notes/notes") or {}
@@ -428,12 +434,18 @@ class BookShellDomains:
             recipe_id = str(arguments.get("recipe_id") or "")
             if not recipe_id:
                 return {"updated": False, "clarificationRequired": True, "message": "Falta identificar la receta."}
-            await self.client.patch_data(f"recipes/items/{recipe_id}", {**allowed, "updatedAt": now})
-            return {"updated": True, "id": recipe_id}
+            write_started = time.perf_counter(); await self.client.patch_data(f"recipes/items/{recipe_id}", {**allowed, "updatedAt": now}); write_ms = (time.perf_counter() - write_started) * 1000
+            readback_started = time.perf_counter(); persisted = await self.client.data("recipes/items") or {}; readback_ms = (time.perf_counter() - readback_started) * 1000
+            saved = persisted.get(recipe_id)
+            verified = bool(saved) and all(saved.get(key) == value for key, value in allowed.items())
+            return {"updated": verified, "verified": verified, "id": recipe_id, "recipe": saved, "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}}
         recipe_id = str(uuid4())
         recipe = {"id": recipe_id, "ingredients": [], "steps": [], **allowed, "createdAt": now, "updatedAt": now}
-        await self.client.put_data(f"recipes/items/{recipe_id}", recipe)
-        return {"created": True, "recipe": recipe}
+        write_started = time.perf_counter(); await self.client.put_data(f"recipes/items/{recipe_id}", recipe); write_ms = (time.perf_counter() - write_started) * 1000
+        readback_started = time.perf_counter(); persisted = await self.client.data("recipes/items") or {}; readback_ms = (time.perf_counter() - readback_started) * 1000
+        saved = persisted.get(recipe_id)
+        verified = bool(saved)
+        return {"created": verified, "verified": verified, "recipe": saved or recipe, "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}}
 
     def _workouts(self, root: dict[str, Any]) -> list[dict[str, Any]]:
         rows = [{"date": date, "id": key, **value} for date, values in (root.get("workouts") or {}).items() for key, value in values.items() if isinstance(value, dict)]
