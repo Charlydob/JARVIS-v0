@@ -183,6 +183,23 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         return DirectIntent("gym_create", "bookshell_gym_write", {
             "action": "create", "date": today.isoformat(), "name": "Entrenamiento", "exercises": [],
         }, domain="gym", operation="create")
+    if re.search(r"\bhabitos?\b", text) and not re.search(r"\b(marca|desmarca|completa|anota|registra)\b", text):
+        mode = "pending" if re.search(r"\bpendient", text) else "list"
+        target_date = _extract_date(text, today) or today.isoformat()
+        return DirectIntent(
+            "habits_list", "bookshell_habits_query", {"mode": mode, "date": target_date},
+            domain="habits", operation="read",
+        )
+    finance_latest = re.search(r"\b(?:ultimo|ultima)\b.*\b(gasto|ingreso|movimiento)\b", text)
+    if finance_latest:
+        movement_type = "expense" if finance_latest.group(1) == "gasto" else "income" if finance_latest.group(1) == "ingreso" else None
+        arguments = {"mode": "latest"}
+        if movement_type:
+            arguments["type"] = movement_type
+        return DirectIntent(
+            "finance_latest", "bookshell_finance_query", arguments,
+            domain="finance", operation="read",
+        )
     reminder_topic = re.search(r"\b(recordatori[oa]s?|recuerdame|clase|cita|dentista|guardia)\b", text)
     creation = re.search(rf"\b{CREATE_PATTERN_NORMALIZED}\b", text)
     reminder_context = reminder_topic or re.search(r"\b(hoy|manana|lunes|martes|miercoles|jueves|viernes|sabado|domingo)\b", text)
@@ -311,6 +328,27 @@ def render_direct_result(kind: str, result: dict[str, Any]) -> str:
         if not workout:
             return str(result.get("message") or "No encuentro entrenamientos registrados, señor.")
         return f"Su último entrenamiento fue {workout.get('name') or 'una sesión'} el {workout.get('date')}, señor."
+    if kind == "habits_list":
+        items = list(result.get("items") or [])
+        if not items:
+            return "No tiene hábitos pendientes para esa fecha, señor."
+        descriptions = [
+            f"{item.get('name')}: {'completado' if item.get('completed') else 'pendiente'}"
+            for item in items[:8]
+        ]
+        return "; ".join(descriptions) + ", señor."
+    if kind == "finance_latest":
+        movement = result.get("movement") or {}
+        if not movement:
+            return "No encuentro movimientos financieros coincidentes, señor."
+        try:
+            amount = f"{float(movement.get('amount')):.2f}"
+        except (TypeError, ValueError):
+            amount = str(movement.get("amount") or "importe desconocido")
+        currency = movement.get("currency") or movement.get("originalCurrency") or ""
+        category = movement.get("category") or movement.get("description") or "sin categoría"
+        movement_date = movement.get("date") or "fecha desconocida"
+        return f"El último movimiento fue {amount} {currency} en {category}, el {movement_date}, señor."
     if kind in {"reminders_today", "reminder_list", "reminder_search"}:
         items = list(result.get("items") or [])
         scope = str(result.get("range") or "today")

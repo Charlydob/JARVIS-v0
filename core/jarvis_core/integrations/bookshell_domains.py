@@ -178,6 +178,10 @@ class BookShellDomains:
         root = await self.client.data("habits") or {}
         habits = self._habits(root)
         date = str(arguments.get("date") or self.today())
+        if _norm(date) in {"today", "hoy"}:
+            date = self.today()
+        elif _norm(date) in {"tomorrow", "manana"}:
+            date = (datetime.now(self.zone).date() + timedelta(days=1)).isoformat()
         name = str(arguments.get("name") or "").strip()
         mode = str(arguments.get("mode") or "list")
         if name:

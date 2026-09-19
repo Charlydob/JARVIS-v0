@@ -158,3 +158,10 @@ def test_reminder_scopes_send_distinct_calendar_ranges() -> None:
     today = datetime.now(ZoneInfo(client.timezone)).date()
     monday = today - timedelta(days=today.weekday())
     assert client.requests == [{"limit": 100, "status": "pending", "range": scope} for scope in ("today", "tomorrow", "this_week", "next_week")]
+
+
+def test_habits_accepts_model_date_aliases() -> None:
+    client = FakeClient({"habits": {"habits": {"habit": {"name": "Leer", "schedule": {"type": "daily"}}}}})
+    result = asyncio.run(BookShellDomains(client).habits_query({"mode": "list", "date": "today"}))
+    assert result["date"] == BookShellDomains(client).today()
+    assert result["items"][0]["name"] == "Leer"

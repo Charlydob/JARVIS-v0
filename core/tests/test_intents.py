@@ -51,6 +51,20 @@ def test_common_stt_gender_variant_still_routes_without_phrase_substitution() ->
     assert intent.arguments == {"scope": "today"}
 
 
+def test_habits_today_uses_deterministic_read_route() -> None:
+    intent = route_direct_intent("¿Qué hábitos tengo hoy?", date(2026, 9, 19))
+    assert intent is not None
+    assert (intent.domain, intent.operation, intent.tool) == ("habits", "read", "bookshell_habits_query")
+    assert intent.arguments == {"mode": "list", "date": "2026-09-19"}
+
+
+def test_latest_expense_uses_deterministic_read_route() -> None:
+    intent = route_direct_intent("¿Cuál es mi último gasto?", date(2026, 9, 19))
+    assert intent is not None
+    assert (intent.domain, intent.operation, intent.tool) == ("finance", "read", "bookshell_finance_query")
+    assert intent.arguments == {"mode": "latest", "type": "expense"}
+
+
 def test_friday_is_resolved_and_missing_time_is_requested() -> None:
     today = date(2026, 9, 17)  # Thursday
     missing = route_direct_intent("Añade clase de alemán el viernes", today)
