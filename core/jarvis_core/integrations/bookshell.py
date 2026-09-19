@@ -1,7 +1,5 @@
-import asyncio
 import json
 import logging
-import os
 import time
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
@@ -11,6 +9,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from jarvis_core.tools import Tool, ToolRegistry
+from jarvis_core.config import CoreSettings
 from jarvis_core.integrations.bookshell_domains import BookShellDomains, register_domain_tools
 
 
@@ -44,38 +43,35 @@ class BookShellClient:
             except ValueError:
                 raw_payload = response.text
             params = kwargs.get("params") or {}
+            count = len(raw_payload) if isinstance(raw_payload, list) else None
+            if isinstance(raw_payload, dict):
+                for key in ("items", "results", "reminders"):
+                    if isinstance(raw_payload.get(key), list):
+                        count = len(raw_payload[key])
+                        break
             self.last_trace = {
                 "request_path": path, "params": dict(params), "http_status": response.status_code,
-                "raw_response": raw_payload,
+                "raw_result_summary": {"keys": sorted(raw_payload) if isinstance(raw_payload, dict) else [], "count": count},
             }
             LOGGER.info(
-                "request_path=%s params=%s http_status=%s raw_response=%s",
+                "endpoint=%s params=%s http_status=%s raw_result_summary=%s",
                 path, json.dumps(dict(params), ensure_ascii=False), response.status_code,
-                json.dumps(raw_payload, ensure_ascii=False),
+                json.dumps(self.last_trace["raw_result_summary"], ensure_ascii=False),
             )
             response.raise_for_status()
             return dict(raw_payload)
 
     async def data(self, path: str) -> Any:
-        return (await self._request("GET", f"/data/{path.strip('/')}" )).get("data")
+        return (await self._request("GET", f"/jarvis/data/{path.strip('/')}" )).get("data")
 
     async def put_data(self, path: str, value: Any) -> dict[str, Any]:
-        return await self._request("PUT", f"/data/{path.strip('/')}", json=value)
+        return await self._request("PUT", f"/jarvis/data/{path.strip('/')}", json=value)
 
     async def patch_data(self, path: str, value: dict[str, Any]) -> dict[str, Any]:
-        return await self._request("PATCH", f"/data/{path.strip('/')}", json=value)
+        return await self._request("PATCH", f"/jarvis/data/{path.strip('/')}", json=value)
 
     async def delete_data(self, path: str) -> dict[str, Any]:
-        return await self._request("DELETE", f"/data/{path.strip('/')}")
-
-    async def push_data(self, path: str, value: Any) -> dict[str, Any]:
-        return await self._request("POST", f"/data/push/{path.strip('/')}", json=value)
-
-    async def transaction(self, path: str, current: Any, next_value: Any) -> dict[str, Any]:
-        return await self._request(
-            "POST", f"/data/transaction/{path.strip('/')}",
-            json={"currentValue": current, "nextValue": next_value},
-        )
+        return await self._request("DELETE", f"/jarvis/data/{path.strip('/')}")
 
     async def books(self) -> dict[str, dict[str, Any]]:
         data = await self.data("books/books") or {}
@@ -109,6 +105,10 @@ class BookShellClient:
     async def query_books(self, arguments: dict[str, Any]) -> dict[str, Any]:
         mode = str(arguments.get("mode") or "current")
         title = str(arguments.get("title") or "").strip() or None
+        if mode != "notes":
+            return await self._request("GET", "/jarvis/books", params={
+                "mode": mode, "title": title or "", "limit": int(arguments.get("limit") or 10),
+            })
         if mode in {"current", "progress"}:
             return await self.current_book(title)
         books = self._ordered_books(await self.books())
@@ -142,67 +142,19 @@ class BookShellClient:
         return {"error": "unsupported_mode"}
 
     async def update_progress(self, page: int, title: str | None = None, book_id: str | None = None) -> dict[str, Any]:
-        all_books = await self.books()
-        if book_id:
-            selected = all_books.get(book_id)
-            selection = {"found": bool(selected), "book": await self._book_summary({"id": book_id, **selected}) if selected else None}
-        elif title:
-            selection = await self.current_book(title)
-        else:
-            ordered = self._ordered_books(all_books)
-            reading = [book for book in ordered if str(book.get("status", "")).lower() == "reading"]
-            chosen = (reading or ordered)[0] if ordered else None
-            selection = {"found": bool(chosen), "book": self._summary(chosen) if chosen else None}
-        if not selection.get("found"):
-            return selection
-        summary = dict(selection["book"])
-        identifier = str(summary["id"])
-        current = dict(all_books[identifier])
-        old_page = int(current.get("currentPage") or 0)
-        total_pages = int(current.get("pages") or 0)
-        target = max(0, min(int(page), total_pages)) if total_pages else max(0, int(page))
-        updated = {
-            **current,
-            "currentPage": target,
-            "status": "finished" if total_pages and target >= total_pages else "reading",
-            "updatedAt": int(time.time() * 1000),
-        }
         write_started = time.perf_counter()
-        await self.transaction(f"books/books/{identifier}", current, updated)
+        result = await self._request("PATCH", "/jarvis/books/progress", json={
+            "page": int(page), "title": title or "", "bookId": book_id or "",
+        })
         write_ms = (time.perf_counter() - write_started) * 1000
-        delta = target - old_page
-        async def update_log() -> bool:
-            if not delta:
-                return True
-            day = datetime.now(ZoneInfo(self.timezone)).date().isoformat()
-            path = f"/data/books/readingLog/{day}/{identifier}"
-            try:
-                log_payload = await self._request("GET", path)
-                current_log = int(log_payload.get("data") or 0)
-                await self.transaction(f"books/readingLog/{day}/{identifier}", log_payload.get("data"), current_log + delta)
-                return True
-            except httpx.HTTPError:
-                return False
-
         readback_started = time.perf_counter()
-        persisted_books, log_updated = await asyncio.gather(self.books(), update_log())
+        readback = await self._request("GET", "/jarvis/books", params={"mode": "current", "title": title or result.get("book", {}).get("title", "")})
         readback_ms = (time.perf_counter() - readback_started) * 1000
-        persisted = persisted_books.get(identifier) or {}
-        verified = int(persisted.get("currentPage") or -1) == target
-        if not verified:
-            return {
-                "updated": False, "verified": False,
-                "message": "La página no aparece guardada al volver a consultar BookShell.",
+        verified = bool(result.get("verified")) and int(readback.get("book", {}).get("currentPage", -1)) == int(result.get("book", {}).get("currentPage", -2))
+        return {**result, "updated": bool(result.get("updated")) and verified, "verified": verified,
+                "book": readback.get("book") or result.get("book"),
                 "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)},
-            }
-        return {
-            "updated": True,
-            "verified": True,
-            "book": self._summary({"id": identifier, **persisted}),
-            "previousPage": old_page,
-            "readingLogUpdated": log_updated,
-            "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)},
-        }
+                **({"message": "La página no aparece guardada al volver a consultar BookShell."} if not verified else {})}
 
     async def create_reminder(self, arguments: dict[str, Any]) -> dict[str, Any]:
         minutes = max(0, int(arguments.get("minutes_before") or 0))
@@ -231,13 +183,13 @@ class BookShellClient:
         write_started = time.perf_counter()
         idempotency_key = str(arguments.get("idempotency_key") or "").strip()
         request_headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
-        payload = await self._request("POST", "/reminders", json=body, headers=request_headers)
+        payload = await self._request("POST", "/jarvis/reminders", json=body, headers=request_headers)
         write_ms = (time.perf_counter() - write_started) * 1000
         reminder = payload.get("reminder") or {}
         reminder_id = str(reminder.get("id") or payload.get("id") or "")
         readback_started = time.perf_counter()
         persisted = await self._request(
-            "GET", "/reminders", params={"from": target_date, "until": target_date, "limit": 100},
+            "GET", "/jarvis/reminders", params={"from": target_date, "until": target_date, "limit": 100},
             headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
         )
         readback_ms = (time.perf_counter() - readback_started) * 1000
@@ -296,10 +248,11 @@ class BookShellClient:
 
 
 def register_tools(registry: ToolRegistry) -> None:
+    settings = CoreSettings()
     client = BookShellClient(
-        base_url=os.getenv("JARVIS_BOOKSHELL_API_URL", "https://api-bookshell.charlydob.com"),
-        token=os.getenv("JARVIS_BOOKSHELL_API_TOKEN", ""),
-        timezone=os.getenv("JARVIS_BOOKSHELL_TIMEZONE", "Europe/Zurich"),
+        base_url=settings.bookshell_api_url,
+        token=settings.bookshell_api_token,
+        timezone=settings.bookshell_timezone,
     )
 
     domains = BookShellDomains(client)

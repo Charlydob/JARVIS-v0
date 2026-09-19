@@ -27,6 +27,9 @@ class CoreSettings(BaseSettings):
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
     tts_voice: str = "es-ES-AlvaroNeural"
+    bookshell_api_url: str = "https://api-bookshell.charlydob.com"
+    bookshell_api_token: str = ""
+    bookshell_timezone: str = "Europe/Zurich"
     tool_modules: str = ""
     data_dir: Path = Path.home() / ".jarvis"
     reconnect_max_seconds: int = 30

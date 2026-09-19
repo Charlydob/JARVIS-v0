@@ -165,16 +165,24 @@ def _reminder_query(text: str) -> str:
 
 def route_direct_intent(message: str, today: date, now: datetime | None = None) -> DirectIntent | None:
     text = normalize(message)
-    page = re.search(r"\bpagina\s+(\d{1,5})\b", text)
+    page = re.search(r"\bpagina\s+(\d{1,5})\b|\b(?:voy\s+(?:por|en)\s+la|hasta\s+la)\s+(\d{1,5})\b", text)
     write_page = page and re.search(r"\b(apunta|anota|actualiza|pon|voy por|he llegado|marca)\b", text)
     if write_page:
-        return DirectIntent("book_update", "bookshell_update_progress", {"page": int(page.group(1))})
+        arguments: dict[str, Any] = {"page": int(page.group(1) or page.group(2))}
+        title_match = re.search(r"\bpagina\s+de\s+([a-z0-9][a-z0-9 ]*?)(?:\s*[.,;]|\s+voy\b|$)", text)
+        if title_match:
+            arguments["title"] = title_match.group(1).strip()
+        return DirectIntent("book_update", "bookshell_update_progress", arguments, domain="books", operation="update")
     if re.search(r"\b(que|cual|por)\b.*\bpagina\b|\bpagina\b.*\b(voy|actual)\b", text):
         return DirectIntent("book_progress", "bookshell_books_query", {"mode": "progress", "limit": 1})
     if re.search(r"\b(que|cual)\b.*\blibro\b.*\b(leo|leyendo|actual)\b|\blibro actual\b", text):
         return DirectIntent("book_current", "bookshell_books_query", {"mode": "current", "limit": 1})
     if re.search(r"\b(?:cual|cuando|que)\b.*\b(?:ultimo|ultima)\b.*\b(?:entrenamiento|sesion)\b|\b(?:ultimo|ultima)\s+(?:entrenamiento|sesion)\b", text):
         return DirectIntent("gym_last", "bookshell_gym_query", {"mode": "last"}, domain="gym", operation="read")
+    if re.search(r"\b(registra|anota|apunta|guarda)\b.*\b(gym|gimnasio|entrenamiento)\b", text):
+        return DirectIntent("gym_create", "bookshell_gym_write", {
+            "action": "create", "date": today.isoformat(), "name": "Entrenamiento", "exercises": [],
+        }, domain="gym", operation="create")
     reminder_topic = re.search(r"\b(recordatorios?|recuerdame|clase|cita|dentista|guardia)\b", text)
     creation = re.search(rf"\b{CREATE_PATTERN_NORMALIZED}\b", text)
     reminder_context = reminder_topic or re.search(r"\b(hoy|manana|lunes|martes|miercoles|jueves|viernes|sabado|domingo)\b", text)
@@ -214,6 +222,11 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
             arguments.update({"from": target_date, "until": target_date})
         if query:
             arguments["query"] = query
+        if "guardia" in text:
+            arguments["event_type"] = "guardia"
+            person = re.search(r"\b(?:tiene|de)\s+([a-z][a-z0-9_-]*)\s+guardia\b", text)
+            if person:
+                arguments["person"] = person.group(1)
         read_operation = "search" if query else "list"
         return DirectIntent(
             f"reminder_{read_operation}", "bookshell_reminders_query", arguments,

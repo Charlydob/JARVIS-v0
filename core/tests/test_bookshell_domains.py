@@ -31,6 +31,9 @@ class FakeClient:
         self.writes.append(("patch", path, value)); return {"ok": True}
 
     async def _request(self, _method: str, _path: str, **_kwargs: Any) -> dict[str, Any]:
+        if _path == "/jarvis/habits/mark":
+            body = _kwargs["json"]
+            return {"updated": True, "verified": True, "habit": {"habit": "Leer", "date": body["date"], "goal": "count", "value": body["value"]}}
         return {"reminders": []}
 
 
@@ -61,7 +64,7 @@ def test_habit_status_and_mark_quantitative_value() -> None:
     updated = asyncio.run(domains.habits_mark({"name": "Leer", "date": "2026-09-17", "value": 3}))
     assert status["habit"]["completed"] is True
     assert updated["value"] == 3
-    assert client.writes[0][:2] == ("put", "habits/habitCounts/h1/2026-09-17")
+    assert updated["verified"] is True
 
 
 def test_finance_write_fails_closed_without_shortcut_token() -> None:
@@ -71,7 +74,7 @@ def test_finance_write_fails_closed_without_shortcut_token() -> None:
     assert client.writes == []
 
 
-def test_finance_fixture_write_uses_shortcut_and_idempotency() -> None:
+def test_finance_fixture_write_uses_private_jarvis_api_and_idempotency() -> None:
     root = {
         "accounts": {"a1": {"name": "Principal", "currency": "CHF", "active": True}},
         "catalog": {"categories": {"food": {"name": "Comida", "type": "expense"}}},
@@ -85,7 +88,7 @@ def test_finance_fixture_write_uses_shortcut_and_idempotency() -> None:
     assert result["movementId"] == "fixture-movement"
     assert result["verified"] is False
     assert client.request is not None
-    assert client.request[1] == "/shortcuts/finance/movements"
+    assert client.request[1] == "/jarvis/finance/movements"
     assert client.request[2]["headers"]["Idempotency-Key"] == "fixture-1"
 
 
@@ -111,7 +114,7 @@ def test_today_reminders_are_fresh_include_overdue_and_exclude_cancelled() -> No
 
         async def _request(self, _method: str, _path: str, **kwargs: Any) -> dict[str, Any]:
             self.request_kwargs = kwargs
-            target_date = kwargs["params"]["from"]
+            target_date = datetime.now(ZoneInfo(self.timezone)).date().isoformat()
             return {"reminders": [
                 {"id": "past", "title": "Clase", "targetDate": target_date, "targetTime": "05:30", "status": "pending"},
                 {"id": "future", "title": "Dentista", "targetDate": target_date, "targetTime": "23:59", "status": "pending"},
@@ -122,7 +125,7 @@ def test_today_reminders_are_fresh_include_overdue_and_exclude_cancelled() -> No
     result = asyncio.run(BookShellDomains(client).reminders_query({"scope": "today"}))
     assert [item["id"] for item in result["items"]] == ["past", "future"]
     assert client.request_kwargs["headers"]["Cache-Control"] == "no-cache"
-    assert client.request_kwargs["params"]["from"] == client.request_kwargs["params"]["until"]
+    assert client.request_kwargs["params"]["range"] == "today"
     assert result["items"][0]["temporalState"] == "vencido"
 
 
@@ -144,9 +147,4 @@ def test_reminder_scopes_send_distinct_calendar_ranges() -> None:
 
     today = datetime.now(ZoneInfo(client.timezone)).date()
     monday = today - timedelta(days=today.weekday())
-    assert client.requests == [
-        {"from": today.isoformat(), "until": today.isoformat()},
-        {"from": (today + timedelta(days=1)).isoformat(), "until": (today + timedelta(days=1)).isoformat()},
-        {"from": monday.isoformat(), "until": (monday + timedelta(days=6)).isoformat()},
-        {"from": (monday + timedelta(days=7)).isoformat(), "until": (monday + timedelta(days=13)).isoformat()},
-    ]
+    assert client.requests == [{"range": scope} for scope in ("today", "tomorrow", "this_week", "next_week")]

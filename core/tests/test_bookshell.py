@@ -14,11 +14,14 @@ def test_query_update_and_confirm_real_shape() -> None:
         nonlocal book
         body = json.loads(request.content) if request.content else None
         requests.append((request.method, request.url.path, body))
-        if request.url.path == "/data/books/books":
+        if request.url.path == "/jarvis/data/books/books":
             return httpx.Response(200, json={"ok": True, "data": {"book-1": book}})
-        if request.url.path.endswith("/books/books/book-1"):
-            book = body["nextValue"]
-            return httpx.Response(200, json={"ok": True, "data": book})
+        if request.url.path == "/jarvis/books/progress":
+            previous = book["currentPage"]
+            book = {**book, "currentPage": body["page"], "updatedAt": 20}
+            return httpx.Response(200, json={"ok": True, "updated": True, "verified": True, "previousPage": previous, "book": {"id": "book-1", **book}})
+        if request.url.path == "/jarvis/books":
+            return httpx.Response(200, json={"ok": True, "found": True, "book": {"id": "book-1", **book, "lastReadingDate": "2026-09-19"}})
         if request.method == "GET":
             return httpx.Response(200, json={"ok": True, "data": None})
         return httpx.Response(200, json={"ok": True, "data": body["nextValue"]})
@@ -31,14 +34,16 @@ def test_query_update_and_confirm_real_shape() -> None:
     assert before["book"]["currentPage"] == 221
     assert changed["book"]["currentPage"] == 222
     assert after["book"]["currentPage"] == 222
-    assert any("readingLog" in path for _, path, _ in requests)
+    assert any(path == "/jarvis/books/progress" for _, path, _ in requests)
 
 
 def test_reminder_uses_canonical_endpoint() -> None:
     captured = {}
     captured_headers = {}
+    paths = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
         if request.method == "POST":
             captured.update(json.loads(request.content))
             captured_headers.update(request.headers)
@@ -53,6 +58,7 @@ def test_reminder_uses_canonical_endpoint() -> None:
     assert captured["timezone"] == "Europe/Zurich"
     assert captured["alerts"][0]["minutesBefore"] == 60
     assert captured_headers["idempotency-key"] == "pending-action-1"
+    assert paths == ["/jarvis/reminders", "/jarvis/reminders"]
 
 
 def test_reminder_without_time_asks_and_does_not_write() -> None:

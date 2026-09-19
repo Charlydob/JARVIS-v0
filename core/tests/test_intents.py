@@ -21,6 +21,26 @@ def test_common_books_and_reminder_intents_are_deterministic() -> None:
     assert gym.arguments == {"mode": "last"}
 
 
+def test_book_write_keeps_title_and_gym_write_wins_over_read() -> None:
+    today = date(2026, 9, 19)
+    book = route_direct_intent("Actualiza la página de Musashi. Voy en la 222.", today)
+    assert book is not None
+    assert book.tool == "bookshell_update_progress"
+    assert book.arguments == {"page": 222, "title": "musashi"}
+    gym = route_direct_intent("Registra que fui al gym hoy.", today)
+    assert gym is not None
+    assert gym.tool == "bookshell_gym_write"
+    assert gym.operation == "create"
+
+
+def test_guardia_search_uses_structured_subject_and_event_type() -> None:
+    intent = route_direct_intent("¿Cuándo tiene Laura guardia?", date(2026, 9, 19))
+    assert intent is not None
+    assert intent.tool == "bookshell_reminders_query"
+    assert intent.arguments["event_type"] == "guardia"
+    assert intent.arguments["person"] == "laura"
+
+
 def test_friday_is_resolved_and_missing_time_is_requested() -> None:
     today = date(2026, 9, 17)  # Thursday
     missing = route_direct_intent("Añade clase de alemán el viernes", today)

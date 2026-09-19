@@ -164,11 +164,13 @@ class BookShellDomains:
             "totalVolumeKg": sum(float(s.get("kg") or 0) * int(s.get("reps") or 0) for e in exercises.values() for s in e["sets"]),
             "updatedAt": now,
         }
-        write_started = time.perf_counter(); await self.client.put_data(f"gym/gym/workouts/{date}/{workout_id}", workout); write_ms = (time.perf_counter() - write_started) * 1000
+        idempotency_key = str(arguments.get("idempotency_key") or hashlib.sha256(json.dumps({"date": date, "name": workout["name"], "exercises": exercises}, sort_keys=True).encode()).hexdigest())
+        write_started = time.perf_counter(); payload = await self.client._request("POST", "/jarvis/gym/sessions", json={**workout, "idempotencyKey": idempotency_key}, headers={"Idempotency-Key": idempotency_key}); write_ms = (time.perf_counter() - write_started) * 1000
         readback_started = time.perf_counter()
         persisted = await self.client.data("gym/gym") or {}
         readback_ms = (time.perf_counter() - readback_started) * 1000
-        saved = ((persisted.get("workouts") or {}).get(date) or {}).get(workout_id)
+        saved_id = str((payload.get("workout") or {}).get("id") or workout_id)
+        saved = ((persisted.get("workouts") or {}).get(date) or {}).get(saved_id)
         verified = bool(saved)
         return {"created": verified, "verified": verified, "workout": self._workout_summary(saved or workout), "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}}
 
@@ -203,20 +205,13 @@ class BookShellDomains:
         if not completed and not arguments.get("confirmed"):
             return {"updated": False, "confirmationRequired": True, "message": "Confirma que quieres desmarcar el hábito."}
         goal = str(chosen.get("goal") or "check")
-        habit_id = str(chosen["id"])
-        if goal == "count":
-            value = max(0, int(arguments.get("value") or 1))
-            await self.client.put_data(f"habits/habitCounts/{habit_id}/{date}", value if completed else None)
-        elif goal == "time":
-            value = max(0, float(arguments.get("value") or 0))
-            unit = str(arguments.get("unit") or "minutes")
-            seconds = int(value if unit == "seconds" else value * 60)
-            await self.client.put_data(f"habits/habitSessions/{habit_id}/{date}", seconds if completed else None)
-            value = seconds
-        else:
-            value = completed
-            await self.client.put_data(f"habits/habitChecks/{habit_id}/{date}", True if completed else None)
-        return {"updated": True, "habit": chosen["name"], "date": date, "goal": goal, "value": value}
+        value = arguments.get("value", 1 if goal == "count" else completed)
+        payload = await self.client._request("POST", "/jarvis/habits/mark", json={
+            "habitId": str(chosen["id"]), "date": date, "completed": completed,
+            "value": value, "unit": str(arguments.get("unit") or "minutes"),
+        })
+        habit = payload.get("habit") or {}
+        return {"updated": bool(payload.get("updated")) and bool(payload.get("verified")), "verified": bool(payload.get("verified")), **habit}
 
     async def finance_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
         root = await self.client.data("finance/finance") or {}
@@ -282,7 +277,7 @@ class BookShellDomains:
         }
         bucket = datetime.now(self.zone).strftime("%Y%m%d%H%M")
         idem = str(arguments.get("idempotency_key") or hashlib.sha256((json.dumps(body, sort_keys=True) + bucket).encode()).hexdigest())
-        write_started = time.perf_counter(); payload = await self.client._request("POST", "/shortcuts/finance/movements", json=body, headers={"Idempotency-Key": idem}); write_ms = (time.perf_counter() - write_started) * 1000
+        write_started = time.perf_counter(); payload = await self.client._request("POST", "/jarvis/finance/movements", json=body, headers={"Idempotency-Key": idem}); write_ms = (time.perf_counter() - write_started) * 1000
         movement_id = str(payload.get("movementId") or payload.get("id") or "")
         readback_started = time.perf_counter(); persisted = await self.client.data("finance/finance") or {}; readback_ms = (time.perf_counter() - readback_started) * 1000
         saved = (persisted.get("transactions") or {}).get(movement_id) if movement_id else None
@@ -293,12 +288,20 @@ class BookShellDomains:
         params = {key: arguments[key] for key in ("status", "from", "until", "limit") if arguments.get(key) is not None}
         scope = str(arguments.get("scope") or "")
         range_from, range_until = self._reminder_range(scope, arguments)
-        if range_from:
+        if scope:
+            params["range"] = scope
+        elif range_from:
             params["from"] = range_from
-        if range_until:
+        if not scope and range_until:
             params["until"] = range_until
+        if arguments.get("query"):
+            params["q"] = arguments["query"]
+        if arguments.get("person"):
+            params["subject"] = arguments["person"]
+        if arguments.get("event_type"):
+            params["eventType"] = arguments["event_type"]
         payload = await self.client._request(
-            "GET", "/reminders", params=params,
+            "GET", "/jarvis/reminders", params=params,
             headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
         )
         items = [
@@ -307,26 +310,17 @@ class BookShellDomains:
         ]
         for item in items:
             item["temporalState"] = self._reminder_temporal_state(item)
-        query = _norm(arguments.get("query"))
-        person = _norm(arguments.get("person"))
-        event_type = _norm(arguments.get("event_type"))
-        if query:
-            items = [item for item in items if query in _norm(f"{item.get('title')} {item.get('description')}")]
-        if person:
-            items = [item for item in items if person in _norm(f"{item.get('title')} {item.get('description')} {json.dumps(item.get('source') or {})}")]
-        if event_type:
-            items = [item for item in items if event_type in _norm(f"{item.get('type')} {item.get('category')} {item.get('title')}")]
         trace = dict(getattr(self.client, "last_trace", {}) or {})
         LOGGER.info(
             "route_domain=reminders route_operation=read date_range=%s..%s tool=bookshell_reminders_query request_path=%s http_status=%s result_count=%d",
-            range_from or "none", range_until or "none", trace.get("request_path", "/reminders"),
+            range_from or "none", range_until or "none", trace.get("request_path", "/jarvis/reminders"),
             trace.get("http_status", "unknown"), len(items),
         )
         return {
             "items": items, "count": len(items), "range": scope or "custom",
             "dateRange": {"from": range_from or None, "until": range_until or None},
             "_trace": {
-                "request_path": trace.get("request_path", "/reminders"),
+                "request_path": trace.get("request_path", "/jarvis/reminders"),
                 "http_status": trace.get("http_status"), "result_count": len(items),
             },
         }
@@ -338,14 +332,18 @@ class BookShellDomains:
             return {"updated": False, "confirmationRequired": True, "message": "Confirma la cancelación del recordatorio."}
         patch: dict[str, Any] = {}
         if action == "complete":
-            patch = {"status": "completed", "completedAt": datetime.now(self.zone).isoformat()}
+            payload = await self.client._request("POST", f"/jarvis/reminders/{reminder_id}/complete", json={})
         elif action == "cancel":
-            patch = {"status": "cancelled"}
+            payload = await self.client._request("DELETE", f"/jarvis/reminders/{reminder_id}")
         else:
             mapping = {"title": "title", "target_date": "targetDate", "target_time": "targetTime", "description": "description"}
             patch = {target: arguments[source] for source, target in mapping.items() if arguments.get(source) is not None}
-        payload = await self.client._request("PATCH", f"/reminders/{reminder_id}", json=patch)
-        return {"updated": True, "reminder": payload.get("reminder")}
+            payload = await self.client._request("PATCH", f"/jarvis/reminders/{reminder_id}", json=patch)
+        readback = await self.client._request("GET", f"/jarvis/reminders/{reminder_id}")
+        saved = readback.get("reminder") or {}
+        expected_status = "completed" if action == "complete" else "cancelled" if action == "cancel" else None
+        verified = bool(saved) and (saved.get("status") == expected_status if expected_status else all(saved.get(key) == value for key, value in patch.items()))
+        return {"updated": verified, "verified": verified, "reminder": saved or payload.get("reminder")}
 
     async def world_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
         root = await self.client.data("world") or {}
