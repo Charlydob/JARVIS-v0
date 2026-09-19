@@ -253,3 +253,38 @@ async def test_missing_tool_reports_real_registry_state(tmp_path: Path) -> None:
 
     assert "no está configurada en el Core" in result["message"]
     assert "bookshell_reminders_query" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_unrelated_short_transcript_never_reuses_previous_tool_route(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+    reads = 0
+
+    async def reminders_query(_arguments):
+        nonlocal reads
+        reads += 1
+        return {"items": [{"title": "Guardia Laura"}], "count": 1, "range": "today"}
+
+    async def plain_chat(_messages, _context=None):
+        yield "No he entendido esa petición."
+
+    services.tools.register(Tool(
+        "bookshell_reminders_query", "query", {"type": "object"}, reminders_query,
+    ))
+    services.ollama.chat_stream = plain_chat
+
+    async def collect(_chunk: str) -> None:
+        return None
+
+    conversation_id = "short-transcript-does-not-repeat"
+    await services.chat_stream({
+        "message": "¿Qué recordatorios tengo hoy?", "conversation_id": conversation_id,
+        "turn_id": "short-route-turn-1",
+    }, collect)
+    second = await services.chat_stream({
+        "message": "¡Suscríbete!", "conversation_id": conversation_id,
+        "turn_id": "short-route-turn-2",
+    }, collect)
+
+    assert reads == 1
+    assert second["message"] == "No he entendido esa petición."

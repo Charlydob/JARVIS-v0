@@ -58,7 +58,7 @@ class ToolRegistry:
             "gym": r"\b(gym|gimnasio|entren|ejercicio|series?|repeticiones?|kilos?|press banca|levante|pesas?)\b",
             "habits": r"\b(habito|habitos|racha|cumpl|pendientes? hoy)\b",
             "finance": r"\b(gasto|gastado|ingreso|sueldo|transfer|francos?|chf|euros?|saldo|cuentas?|movimiento|spent|expense|income|balance)\b",
-            "reminder": r"\b(recordatorios?|recuerdame|agenda|guardia|dentista|clase|cita|evento|que tengo hoy|que tengo esta semana|remind|reminders?|schedule|appointment)\b",
+            "reminder": r"\b(recordatori[oa]s?|recuerdame|agenda|guardia|dentista|clase|cita|evento|que tengo hoy|que tengo esta semana|remind|reminders?|schedule|appointment)\b",
             "world": r"\b(lugar|sitio|cafeteria|restaurante|local|ubicacion|guardado en|valoracion|puntuacion)\b",
             "notes": r"\b(nota|notas|apunte|buscar en mis notas)\b",
             "recipes": r"\b(receta|recetas|ingredientes?|cocinar|preparacion)\b",
@@ -85,7 +85,7 @@ class ToolRegistry:
             r"\b(anad\w*|agreg\w*|cre\w*|apunt\w*|anot\w*|recuerdame|ponme|cambia|mueve|actualiza|cancela|elimina|borra|completa)\b",
             normalized,
         )
-        if not reminder_write and re.search(r"\b(recordatorios?|reminders?)\b", normalized) and re.search(r"\b(hoy|today)\b", normalized):
+        if not reminder_write and re.search(r"\b(recordatori[oa]s?|reminders?)\b", normalized) and re.search(r"\b(hoy|today)\b", normalized):
             if "bookshell_reminders_query" in self._tools:
                 return "bookshell_reminders_query", {"scope": "today"}
         if re.search(r"\b(pagina|page)\b", normalized) and re.search(r"\b(libro|book|voy|current)\b", normalized):
@@ -99,7 +99,7 @@ class ToolRegistry:
         if re.search(r"\b(anad\w*|agreg\w*|cre\w*|apunt\w*|anot\w*|recuerdame|ponme|cambia|actualiza|cancela|elimina|borra|marca)\b", normalized):
             return None
         queries = (
-            (r"\b(recordatorios?|agenda|citas?)\b", "bookshell_reminders_query"),
+            (r"\b(recordatori[oa]s?|agenda|citas?|guardia)\b", "bookshell_reminders_query"),
             (r"\b(libro|libros|pagina|leyendo|lectura)\b", "bookshell_books_query"),
             (r"\b(gym|gimnasio|entrenamiento|ejercicio)\b", "bookshell_gym_query"),
             (r"\b(habito|habitos|racha)\b", "bookshell_habits_query"),

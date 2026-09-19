@@ -39,6 +39,16 @@ def test_guardia_search_uses_structured_subject_and_event_type() -> None:
     assert intent.tool == "bookshell_reminders_query"
     assert intent.arguments["event_type"] == "guardia"
     assert intent.arguments["person"] == "laura"
+    assert intent.arguments["temporal_scope"] == "future"
+    assert intent.arguments["status"] == "pending"
+    assert "query" not in intent.arguments
+
+
+def test_common_stt_gender_variant_still_routes_without_phrase_substitution() -> None:
+    intent = route_direct_intent("¿Qué recordatorias tengo hoy?", date(2026, 9, 19))
+    assert intent is not None
+    assert intent.tool == "bookshell_reminders_query"
+    assert intent.arguments == {"scope": "today"}
 
 
 def test_friday_is_resolved_and_missing_time_is_requested() -> None:
@@ -186,6 +196,12 @@ def test_reminder_temporal_scopes_are_not_reused_or_turned_into_queries(message:
     assert intent is not None
     assert intent.arguments == {"scope": scope}
     assert intent.operation == "list"
+
+
+def test_wake_word_is_not_sent_as_a_bookshell_search_filter() -> None:
+    intent = route_direct_intent("¿Qué recordatorios tengo mañana, JARVIS?", date(2026, 9, 19))
+    assert intent is not None
+    assert intent.arguments == {"scope": "tomorrow"}
 
 
 @pytest.mark.parametrize(

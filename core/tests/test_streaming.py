@@ -113,6 +113,6 @@ async def test_failed_tool_is_reported_without_false_success(tmp_path: Path) -> 
 
     result = await services.chat_stream({"message": "Recuérdame mañana a las 18:00 que tengo alemán"}, on_chunk)
 
-    assert result["message"] == "No se pudo guardar, señor."
+    assert result["message"] == "No se pudo guardar: BookShell unavailable, señor."
     assert "creado" not in result["message"].casefold()
     assert chunks == [result["message"]]

@@ -26,6 +26,7 @@ class CoreSettings(BaseSettings):
     whisper_model: str = "small"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
+    whisper_language: str = "es"
     tts_voice: str = "es-ES-AlvaroNeural"
     bookshell_api_url: str = "https://api-bookshell.charlydob.com"
     bookshell_api_token: str = ""

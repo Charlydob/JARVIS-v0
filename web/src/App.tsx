@@ -363,6 +363,7 @@ export default function App() {
   const voiceCapture = useContinuousVoice({
     enabled: coreOnline && !muted && view === 'face' && state !== 'error',
     paused: busy,
+    conversationState: state,
     onListening: useCallback(() => dispatch({ type: 'START_LISTENING' }), []),
     onUtterance: useCallback((audio, metadata, lifecycle) => processAudio(audio, metadata, lifecycle), [processAudio]),
     onError: useCallback((message) => { setNotice(message); dispatch({ type: 'FAIL' }) }, [])

@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 import edge_tts
 import httpx
+import av
 from edge_tts import VoicesManager
 from faster_whisper import WhisperModel
 from jarvis_core.config import CoreSettings
@@ -215,6 +216,7 @@ class SpeechToTextService:
         self.model_name = settings.whisper_model
         self.device = settings.whisper_device
         self.compute_type = settings.whisper_compute_type
+        self.language = settings.whisper_language.strip().lower() or "es"
         self._model: WhisperModel | None = None
         self._lock = asyncio.Lock()
 
@@ -241,21 +243,63 @@ class SpeechToTextService:
         finally:
             path.unlink(missing_ok=True)
 
+    @staticmethod
+    def _audio_probe(path: Path) -> dict[str, Any]:
+        try:
+            with av.open(str(path), mode="r", metadata_errors="ignore") as container:
+                stream = next((item for item in container.streams if item.type == "audio"), None)
+                if stream is None:
+                    return {"discard_reason": "missing_audio_stream"}
+                codec = stream.codec_context
+                duration = None
+                if stream.duration is not None and stream.time_base is not None:
+                    duration = float(stream.duration * stream.time_base)
+                elif container.duration is not None:
+                    duration = float(container.duration / av.time_base)
+                return {
+                    "audio_format": str(container.format.name or "unknown"),
+                    "audio_codec": str(codec.name or "unknown"),
+                    "sample_rate": int(codec.sample_rate or 0),
+                    "channels": int(codec.channels or 0),
+                    "container_duration_s": round(duration or 0.0, 3),
+                }
+        except (av.error.InvalidDataError, EOFError, OSError):
+            return {"discard_reason": "invalid_audio_container"}
+
     def _transcribe_file(self, path: Path) -> tuple[str, str, dict[str, Any]]:
+        probe = self._audio_probe(path)
+        if probe.get("discard_reason"):
+            return "", self.language, {
+                **probe,
+                "decoded_duration_s": 0.0,
+                "duration_after_vad_s": 0.0,
+                "language_probability": 0.0,
+                "segment_count": 0,
+            }
         segments, info = self._load().transcribe(
             str(path),
+            language=self.language,
             beam_size=5,
             temperature=0.0,
             condition_on_previous_text=False,
-            initial_prompt="JARVIS",
+            hotwords="JARVIS recordatorios mañana hoy guardia Laura Musashi página gimnasio hábitos finanzas",
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 450},
         )
-        transcript = " ".join(segment.text.strip() for segment in segments).strip()
+        decoded_segments = list(segments)
+        transcript = " ".join(segment.text.strip() for segment in decoded_segments).strip()
+        log_probabilities = [float(segment.avg_logprob) for segment in decoded_segments]
+        no_speech_probabilities = [float(segment.no_speech_prob) for segment in decoded_segments]
+        compression_ratios = [float(segment.compression_ratio) for segment in decoded_segments]
         metadata = {
+            **probe,
             "decoded_duration_s": round(float(getattr(info, "duration", 0.0) or 0.0), 3),
             "duration_after_vad_s": round(float(getattr(info, "duration_after_vad", 0.0) or 0.0), 3),
             "language_probability": round(float(getattr(info, "language_probability", 0.0) or 0.0), 3),
+            "segment_count": len(decoded_segments),
+            "avg_logprob": round(sum(log_probabilities) / len(log_probabilities), 3) if log_probabilities else None,
+            "max_no_speech_prob": round(max(no_speech_probabilities), 3) if no_speech_probabilities else None,
+            "max_compression_ratio": round(max(compression_ratios), 3) if compression_ratios else None,
         }
         return transcript, info.language, metadata
 
@@ -373,19 +417,27 @@ class JarvisServices:
             transcript, language, metadata = await self.stt.transcribe(raw, content_type)
             transcript = collapse_repeated_phrases(transcript)
             LOGGER.info(
-                "Whisper result: language=%s probability=%s decoded_s=%s after_vad_s=%s transcript=%r",
+                "utterance_id=%s audio_format=%s codec=%s sample_rate=%s channels=%s container_duration_s=%s "
+                "detected_language=%s language_probability=%s decoded_s=%s after_vad_s=%s segment_count=%s "
+                "avg_logprob=%s max_no_speech_prob=%s max_compression_ratio=%s transcript=%r",
+                utterance_id,
+                metadata.get("audio_format", "unknown"), metadata.get("audio_codec", "unknown"),
+                metadata.get("sample_rate", "unknown"), metadata.get("channels", "unknown"),
+                metadata.get("container_duration_s", "unknown"),
                 language,
-                metadata["language_probability"],
-                metadata["decoded_duration_s"],
-                metadata["duration_after_vad_s"],
+                metadata.get("language_probability", 0),
+                metadata.get("decoded_duration_s", 0),
+                metadata.get("duration_after_vad_s", 0),
+                metadata.get("segment_count", 0), metadata.get("avg_logprob"),
+                metadata.get("max_no_speech_prob"), metadata.get("max_compression_ratio"),
                 transcript,
             )
             normalized = normalized_transcript(transcript)
             conversation_key = str(payload.get("conversation_id") or "global")
             now = time.monotonic()
             previous = self._recent_transcripts.get(conversation_key)
-            discard_reason = None
-            if not normalized:
+            discard_reason = metadata.get("discard_reason")
+            if not normalized and not discard_reason:
                 discard_reason = "empty_transcript"
             elif normalized in NOISE_TRANSCRIPTS or len(normalized.replace(" ", "")) < 2:
                 discard_reason = "noise_transcript"
@@ -638,11 +690,16 @@ class JarvisServices:
                             self._recent_completed_intents[conversation_id] = (direct, time.monotonic())
                         if len(self._action_results) > 200:
                             self._action_results.pop(next(iter(self._action_results)))
-                except Exception:
+                except Exception as exc:
                     if action_key:
                         self._action_results.pop(action_key, None)
                     TOOL_LOGGER.exception("turn_id=%s tool_call_id=%s event=tool_error tool=%s", turn_id, tool_call_id, direct.tool)
-                    answer = "No se pudo guardar, señor." if direct.kind in {"book_update", "reminder_create"} else "No he podido consultar BookShell, señor."
+                    technical_cause = re.sub(r"\s+", " ", str(exc)).strip()[:240] or type(exc).__name__
+                    answer = (
+                        f"No se pudo guardar: {technical_cause}, señor."
+                        if direct.kind in {"book_update", "reminder_create"}
+                        else f"No he podido consultar BookShell: {technical_cause}, señor."
+                    )
                 PERFORMANCE_LOGGER.info(
                     "turn_id=%s stage=tool_execution_and_readback duration_ms=%.1f",
                     turn_id, (time.perf_counter() - tool_started) * 1000,
@@ -703,8 +760,11 @@ class JarvisServices:
         context = "\n".join(context_parts)
         conversation: list[dict[str, Any]] = [*previous, {"role": "user", "content": message}]
         routing_started = time.perf_counter()
-        if not repair_source and len(re.findall(r"[^\W\d_]+", message, flags=re.UNICODE)) <= 3 and previous:
-            routing_message = " ".join(str(item.get("content", "")) for item in previous[-2:]) + " " + message
+        # Tool routing is based on the current utterance only. Pending actions
+        # are resumed explicitly above; concatenating an earlier reminder turn
+        # made unrelated short transcripts such as "suscríbete" execute the
+        # previous tool again.
+        routing_message = repair_source or message
         definitions = self.tools.definitions_for(routing_message)
         PERFORMANCE_LOGGER.info("turn_id=%s stage=tool_schema_selection duration_ms=%.1f tools=%d", turn_id, (time.perf_counter() - routing_started) * 1000, len(definitions))
         if definitions:

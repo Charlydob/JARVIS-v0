@@ -43,6 +43,7 @@ class BookShellClient:
             except ValueError:
                 raw_payload = response.text
             params = kwargs.get("params") or {}
+            request_json = kwargs.get("json")
             count = len(raw_payload) if isinstance(raw_payload, list) else None
             if isinstance(raw_payload, dict):
                 for key in ("items", "results", "reminders"):
@@ -54,11 +55,16 @@ class BookShellClient:
                 "raw_result_summary": {"keys": sorted(raw_payload) if isinstance(raw_payload, dict) else [], "count": count},
             }
             LOGGER.info(
-                "endpoint=%s params=%s http_status=%s raw_result_summary=%s",
-                path, json.dumps(dict(params), ensure_ascii=False), response.status_code,
+                "method=%s endpoint=%s params=%s request_json=%s http_status=%s raw_result_summary=%s",
+                method, path, json.dumps(dict(params), ensure_ascii=False),
+                json.dumps(request_json, ensure_ascii=False)[:2000] if request_json is not None else "null",
+                response.status_code,
                 json.dumps(self.last_trace["raw_result_summary"], ensure_ascii=False),
             )
-            response.raise_for_status()
+            if not response.is_success:
+                api_error = str(raw_payload.get("error") or raw_payload.get("detail") or "unknown_error") if isinstance(raw_payload, dict) else str(raw_payload)
+                LOGGER.error("endpoint=%s http_status=%s bookshell_error=%s", path, response.status_code, api_error)
+                raise RuntimeError(f"BookShell HTTP {response.status_code}: {api_error}")
             return dict(raw_payload)
 
     async def data(self, path: str) -> Any:

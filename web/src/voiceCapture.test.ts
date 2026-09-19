@@ -40,4 +40,36 @@ describe('voice capture state machine', () => {
     expect(machine.start('manual-2')).toBe(true)
     expect(machine.bufferedChunks()).toBe(0)
   })
+
+  it('never starts another utterance while finalizing, transcribing, processing, or speaking', () => {
+    const machine = new VoiceCaptureMachine()
+    expect(machine.start('active')).toBe(true)
+    expect(machine.start('overlap-listening')).toBe(false)
+    machine.addChunk('active', new Blob(['audio']))
+    expect(machine.requestFinalize('active')).toBe(true)
+    expect(machine.start('overlap-finalizing')).toBe(false)
+    machine.takeFinalizedChunks('active')
+    expect(machine.start('overlap-transcribing')).toBe(false)
+    machine.processing('active')
+    expect(machine.start('overlap-processing')).toBe(false)
+    machine.speaking('active')
+    expect(machine.start('overlap-speaking')).toBe(false)
+    expect(machine.complete('active')).toBe(true)
+    expect(machine.start('next-turn')).toBe(true)
+  })
+
+  it('keeps the MediaRecorder initialization chunk while bounding pre-roll', async () => {
+    const machine = new VoiceCaptureMachine()
+    expect(machine.start('header-safe')).toBe(true)
+    machine.addChunk('header-safe', new Blob(['webm-header']))
+    for (let index = 0; index < 20; index += 1) {
+      machine.addChunk('header-safe', new Blob([`chunk-${index}`]))
+      machine.retainRecentChunks('header-safe', 8)
+    }
+    expect(machine.bufferedChunks()).toBe(9)
+    machine.requestFinalize('header-safe')
+    const chunks = machine.takeFinalizedChunks('header-safe')
+    expect(await chunks[0].text()).toBe('webm-header')
+    expect(await chunks.at(-1)?.text()).toBe('chunk-19')
+  })
 })

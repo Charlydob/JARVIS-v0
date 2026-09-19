@@ -157,7 +157,7 @@ def _reminder_title(message: str) -> str:
 
 def _reminder_query(text: str) -> str:
     query = re.sub(
-        r"\b(?:que|tengo|algo|para|hoy|manana|esta|este|la|el|semana|proxima|siguiente|viene|lunes|martes|miercoles|jueves|viernes|sabado|domingo|recordatorios?|hay|cuando)\b",
+        r"\b(?:jarvis|que|tengo|tiene|algo|para|hoy|manana|esta|este|la|el|de|semana|proxima|siguiente|viene|lunes|martes|miercoles|jueves|viernes|sabado|domingo|recordatori[oa]s?|hay|cuando|guardia)\b",
         " ", text,
     )
     return re.sub(r"\s+", " ", query).strip(" ¿?¡!,.-")
@@ -183,7 +183,7 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         return DirectIntent("gym_create", "bookshell_gym_write", {
             "action": "create", "date": today.isoformat(), "name": "Entrenamiento", "exercises": [],
         }, domain="gym", operation="create")
-    reminder_topic = re.search(r"\b(recordatorios?|recuerdame|clase|cita|dentista|guardia)\b", text)
+    reminder_topic = re.search(r"\b(recordatori[oa]s?|recuerdame|clase|cita|dentista|guardia)\b", text)
     creation = re.search(rf"\b{CREATE_PATTERN_NORMALIZED}\b", text)
     reminder_context = reminder_topic or re.search(r"\b(hoy|manana|lunes|martes|miercoles|jueves|viernes|sabado|domingo)\b", text)
 
@@ -227,6 +227,12 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
             person = re.search(r"\b(?:tiene|de)\s+([a-z][a-z0-9_-]*)\s+guardia\b", text)
             if person:
                 arguments["person"] = person.group(1)
+            arguments["temporal_scope"] = "future"
+            arguments["status"] = "pending"
+            # Guardia/person are structured filters. Reapplying them as one
+            # free-text phrase turns the intended AND query into an impossible
+            # match for canonical rows such as "Guardia Laura".
+            arguments.pop("query", None)
         read_operation = "search" if query else "list"
         return DirectIntent(
             f"reminder_{read_operation}", "bookshell_reminders_query", arguments,
@@ -299,7 +305,7 @@ def render_direct_result(kind: str, result: dict[str, Any]) -> str:
         title, page, pages = book.get("title"), book.get("currentPage"), book.get("pages")
         return f"Está leyendo {title} y va por la página {page} de {pages}, señor."
     if kind == "book_update":
-        return "Anotado, señor." if result.get("updated") and result.get("verified") else "No se pudo guardar, señor."
+        return "Anotado, señor." if result.get("updated") and result.get("verified") else str(result.get("message") or "BookShell no confirmó la escritura, señor.")
     if kind == "gym_last":
         workout = result.get("workout") or {}
         if not workout:
@@ -324,5 +330,5 @@ def render_direct_result(kind: str, result: dict[str, Any]) -> str:
             descriptions.append(description)
         return "; ".join(descriptions) + ", señor."
     if kind == "reminder_create":
-        return "Recordatorio creado, señor." if result.get("created") and result.get("verified") else "No se pudo guardar, señor."
+        return "Recordatorio creado, señor." if result.get("created") and result.get("verified") else str(result.get("message") or "BookShell no confirmó la escritura, señor.")
     return "Hecho, señor."

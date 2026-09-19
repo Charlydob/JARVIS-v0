@@ -10,6 +10,7 @@ export interface VoiceUtteranceLifecycle {
 interface ContinuousVoiceOptions {
   enabled: boolean
   paused: boolean
+  conversationState: string
   onListening: () => void
   onUtterance: (audio: Blob, metadata: AudioCaptureMetadata, lifecycle: VoiceUtteranceLifecycle) => Promise<void> | void
   onError: (message: string) => void
@@ -32,6 +33,7 @@ const MAX_SPEECH_UTTERANCE_MS = 20_000
 let sharedMicrophone: MediaStream | undefined
 let pendingMicrophone: Promise<MediaStream> | undefined
 let getUserMediaCallCount = 0
+const activeRecorderSessions = new Set<string>()
 
 type AudioSessionNavigator = Navigator & { audioSession?: { type: string } }
 
@@ -97,11 +99,13 @@ function releaseMicrophone() {
 
 if (typeof window !== 'undefined') window.addEventListener('pagehide', releaseMicrophone)
 
-export function useContinuousVoice({ enabled, paused, onListening, onUtterance, onError }: ContinuousVoiceOptions) {
+export function useContinuousVoice({ enabled, paused, conversationState, onListening, onUtterance, onError }: ContinuousVoiceOptions) {
   const callbacks = useRef({ onListening, onUtterance, onError })
   const pausedRef = useRef(paused)
+  const conversationStateRef = useRef(conversationState)
   callbacks.current = { onListening, onUtterance, onError }
   pausedRef.current = paused
+  conversationStateRef.current = conversationState
   const manualFinalizeRef = useRef<() => boolean>(() => false)
   const [canFinalize, setCanFinalize] = useState(false)
   const finalizeNow = useCallback(() => manualFinalizeRef.current(), [])
@@ -114,6 +118,7 @@ export function useContinuousVoice({ enabled, paused, onListening, onUtterance, 
     }
 
     const machine = new VoiceCaptureMachine()
+    const recorderSessionId = crypto.randomUUID()
     let cancelled = false
     let animationFrame = 0
     let context: AudioContext | undefined
@@ -137,9 +142,19 @@ export function useContinuousVoice({ enabled, paused, onListening, onUtterance, 
     let voiceFrames = 0
     let activeUtteranceId: string | undefined
     let finalizingUtteranceId: string | undefined
+    let lastCaptureIgnoredReason = ''
 
     const log = (event: string, fields: Record<string, unknown> = {}) => {
-      console.info('[JARVIS voice]', { utterance_id: machine.utteranceId, event, ...fields })
+      console.info('[JARVIS voice]', {
+        utterance_id: machine.utteranceId,
+        event,
+        audio_state: machine.phase,
+        conversation_state: conversationStateRef.current.toUpperCase(),
+        mic_active: Boolean(sharedMicrophone?.getAudioTracks().some((track) => track.readyState === 'live' && track.enabled)),
+        active_media_recorders: activeRecorderSessions.size,
+        recorder_state: recorder?.state ?? 'uninitialized',
+        ...fields,
+      })
     }
 
     const clearCaptureTimers = () => {
@@ -177,6 +192,9 @@ export function useContinuousVoice({ enabled, paused, onListening, onUtterance, 
       setCanFinalize(false)
       try { recorder.requestData() } catch { /* Safari may not implement requestData reliably */ }
       recorder.stop()
+      activeRecorderSessions.delete(recorderSessionId)
+      if (submit) setMicrophoneTracksEnabled(false)
+      log('audio_state_changed', { capture_ignored_reason: submit ? 'processing_started' : reason })
       recorderStopWatchdog = window.setTimeout(() => {
         if (machine.phase !== 'FINALIZING') return
         log('recording_finalized', { discard_reason: 'recorder_stop_timeout' })
@@ -188,13 +206,22 @@ export function useContinuousVoice({ enabled, paused, onListening, onUtterance, 
 
     const startRecording = () => {
       if (cancelled || pausedRef.current || !recorder || recorder.state !== 'inactive' || machine.phase !== 'IDLE') return
+      if (activeRecorderSessions.size && !activeRecorderSessions.has(recorderSessionId)) {
+        if (lastCaptureIgnoredReason !== 'another_media_recorder_active') {
+          lastCaptureIgnoredReason = 'another_media_recorder_active'
+          log('capture_ignored', { capture_ignored_reason: lastCaptureIgnoredReason })
+        }
+        return
+      }
       if (context?.state === 'suspended') void context.resume()
       prepareCaptureMode()
       const utteranceId = crypto.randomUUID()
       if (!machine.start(utteranceId)) return
       activeUtteranceId = utteranceId
       resetMetrics()
+      activeRecorderSessions.add(recorderSessionId)
       recorder.start(250)
+      lastCaptureIgnoredReason = ''
       log('recording_started')
       callbacks.current.onListening()
       recordingWatchdog = window.setTimeout(() => {
@@ -209,6 +236,11 @@ export function useContinuousVoice({ enabled, paused, onListening, onUtterance, 
       if (cancelled) return
       if (pausedRef.current && machine.phase === 'LISTENING') {
         stopRecording(false, 'paused_before_submission')
+      } else if (pausedRef.current && machine.phase === 'IDLE') {
+        if (lastCaptureIgnoredReason !== 'conversation_busy') {
+          lastCaptureIgnoredReason = 'conversation_busy'
+          log('capture_ignored', { capture_ignored_reason: lastCaptureIgnoredReason })
+        }
       } else if (machine.phase === 'IDLE') {
         startRecording()
       } else if (machine.phase === 'LISTENING' && recorder?.state === 'recording' && analyser && samples) {
@@ -256,6 +288,7 @@ export function useContinuousVoice({ enabled, paused, onListening, onUtterance, 
       const durationMs = Math.max(0, stoppedAt - captureStartedAt)
       const speechMs = heardVoice ? Math.max(0, lastVoiceAt - speechStartedAt) : 0
       const finalizedChunks = machine.takeFinalizedChunks(utteranceId)
+      log('audio_state_changed')
       finalizingUtteranceId = undefined
       const audio = new Blob(finalizedChunks, { type: recorder?.mimeType || 'audio/webm' })
       const manualFinalize = stopReason === 'manual_finalize'
@@ -281,19 +314,19 @@ export function useContinuousVoice({ enabled, paused, onListening, onUtterance, 
         return
       }
 
-      setMicrophoneTracksEnabled(false)
       log('transcription_started')
       try {
         await callbacks.current.onUtterance(
           audio,
           { durationMs, speechMs: effectiveSpeechMs, maxRms, utteranceId, manualFinalize },
           {
-            processing: () => machine.processing(utteranceId),
-            speaking: () => machine.speaking(utteranceId),
+            processing: () => { machine.processing(utteranceId); log('audio_state_changed') },
+            speaking: () => { machine.speaking(utteranceId); log('audio_state_changed') },
           },
         )
       } finally {
         machine.complete(utteranceId)
+        log('audio_state_changed', { capture_ignored_reason: 'none' })
         setCanFinalize(false)
         if (!cancelled) prepareCaptureMode()
       }
@@ -352,6 +385,7 @@ export function useContinuousVoice({ enabled, paused, onListening, onUtterance, 
         recorder.onstop = null
         if (recorder.state === 'recording') recorder.stop()
       }
+      activeRecorderSessions.delete(recorderSessionId)
       machine.abort()
       activeUtteranceId = undefined
       finalizingUtteranceId = undefined

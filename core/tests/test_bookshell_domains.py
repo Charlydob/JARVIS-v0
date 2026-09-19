@@ -157,4 +157,4 @@ def test_reminder_scopes_send_distinct_calendar_ranges() -> None:
 
     today = datetime.now(ZoneInfo(client.timezone)).date()
     monday = today - timedelta(days=today.weekday())
-    assert client.requests == [{"limit": 100, "range": scope} for scope in ("today", "tomorrow", "this_week", "next_week")]
+    assert client.requests == [{"limit": 100, "status": "pending", "range": scope} for scope in ("today", "tomorrow", "this_week", "next_week")]
