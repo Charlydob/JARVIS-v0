@@ -286,6 +286,7 @@ class BookShellDomains:
 
     async def reminders_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
         params = {key: arguments[key] for key in ("status", "from", "until", "limit") if arguments.get(key) is not None}
+        params.setdefault("limit", 100)
         scope = str(arguments.get("scope") or "")
         range_from, range_until = self._reminder_range(scope, arguments)
         if scope:
