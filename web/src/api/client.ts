@@ -77,6 +77,15 @@ export async function getStatus(): Promise<StatusResponse> {
 
 export interface UserLocation { latitude: number; longitude: number }
 
+type StreamEvent =
+  | { type: 'chunk'; content: string; event_id?: string; turn_id?: string }
+  | ({ type: 'result'; event_id?: string; turn_id?: string } & ChatResponse)
+  | { type: 'error'; message: string; event_id?: string; turn_id?: string }
+
+export function isStreamEventForTurn(event: StreamEvent, turnId: string): boolean {
+  return event.turn_id === turnId
+}
+
 export async function sendMessage(message: string, conversationId?: string, location?: UserLocation, language?: string, languageConfidence?: number): Promise<ChatResponse> {
   return (await checked(await timedFetch(`${apiUrl}/api/chat`, {
     method: 'POST',
@@ -110,7 +119,8 @@ export async function streamMessage(
   const consume = (block: string) => {
     const data = block.split('\n').find((line) => line.startsWith('data: '))?.slice(6)
     if (!data) return
-    const event = JSON.parse(data) as ({ type: 'chunk'; content: string; event_id?: string } | ({ type: 'result'; event_id?: string } & ChatResponse) | { type: 'error'; message: string; event_id?: string })
+    const event = JSON.parse(data) as StreamEvent
+    if (!isStreamEventForTurn(event, turnId)) return
     if (event.event_id && seenEvents.has(event.event_id)) return
     if (event.event_id) seenEvents.add(event.event_id)
     if (event.type === 'chunk') onChunk(event.content)

@@ -76,7 +76,11 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
             async for event in relay(request).stream_request("chat_stream", payload.model_dump()):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except (CoreOfflineError, CoreRequestError) as exc:
-            error = {"type": "error", "message": str(unavailable(exc).detail)}
+            error = {
+                "type": "error", "message": str(unavailable(exc).detail),
+                "turn_id": payload.turn_id,
+                "event_id": f"{payload.turn_id}:error" if payload.turn_id else None,
+            }
             yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(

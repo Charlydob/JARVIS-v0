@@ -58,18 +58,19 @@ describe('voice capture state machine', () => {
     expect(machine.start('next-turn')).toBe(true)
   })
 
-  it('keeps the MediaRecorder initialization chunk while bounding pre-roll', async () => {
+  it('keeps every MediaRecorder chunk contiguous until finalization', async () => {
     const machine = new VoiceCaptureMachine()
-    expect(machine.start('header-safe')).toBe(true)
-    machine.addChunk('header-safe', new Blob(['webm-header']))
+    expect(machine.start('container-safe')).toBe(true)
+    machine.addChunk('container-safe', new Blob(['webm-header']))
     for (let index = 0; index < 20; index += 1) {
-      machine.addChunk('header-safe', new Blob([`chunk-${index}`]))
-      machine.retainRecentChunks('header-safe', 8)
+      machine.addChunk('container-safe', new Blob([`chunk-${index}`]))
     }
-    expect(machine.bufferedChunks()).toBe(9)
-    machine.requestFinalize('header-safe')
-    const chunks = machine.takeFinalizedChunks('header-safe')
+    expect(machine.bufferedChunks()).toBe(21)
+    machine.requestFinalize('container-safe')
+    const chunks = machine.takeFinalizedChunks('container-safe')
     expect(await chunks[0].text()).toBe('webm-header')
+    expect(await chunks[1].text()).toBe('chunk-0')
+    expect(await chunks[10].text()).toBe('chunk-9')
     expect(await chunks.at(-1)?.text()).toBe('chunk-19')
   })
 })

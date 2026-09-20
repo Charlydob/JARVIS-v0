@@ -21,6 +21,35 @@ def test_common_books_and_reminder_intents_are_deterministic() -> None:
     assert gym.arguments == {"mode": "last"}
 
 
+def test_required_real_phrases_route_with_exact_write_and_filters() -> None:
+    zone = ZoneInfo("Europe/Zurich")
+    now = datetime(2026, 9, 20, 12, 0, tzinfo=zone)
+
+    book = route_direct_intent("Anota que voy por la página 229.", now.date(), now)
+    assert (book.tool, book.operation, book.arguments) == (
+        "bookshell_update_progress", "update", {"page": 229},
+    )
+
+    reminder = route_direct_intent(
+        "Crea un recordatorio para mañana a las cuatro de la tarde de que llega el paquete de Apple.",
+        now.date(), now,
+    )
+    assert (reminder.tool, reminder.operation, reminder.arguments) == (
+        "bookshell_create_reminder", "create", {
+            "title": "llega el paquete de Apple", "minutes_before": 0,
+            "target_date": "2026-09-21", "target_time": "16:00",
+        },
+    )
+
+    week = route_direct_intent("¿Qué tengo esta semana?", now.date(), now)
+    assert week.arguments == {"scope": "this_week"}
+
+    guard = route_direct_intent("¿Cuándo tiene Laura guardia?", now.date(), now)
+    assert guard.arguments == {
+        "event_type": "guardia", "person": "laura", "temporal_scope": "future", "status": "pending",
+    }
+
+
 def test_book_write_keeps_title_and_gym_write_wins_over_read() -> None:
     today = date(2026, 9, 19)
     book = route_direct_intent("Actualiza la página de Musashi. Voy en la 222.", today)

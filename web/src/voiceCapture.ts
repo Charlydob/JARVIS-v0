@@ -25,18 +25,6 @@ export class VoiceCaptureMachine {
     return true
   }
 
-  retainRecentChunks(utteranceId: string, maximum: number) {
-    if (utteranceId !== this.utteranceId || this.phase !== 'LISTENING') return false
-    // MediaRecorder containers such as WebM keep their initialization data in
-    // the first emitted chunk. Dropping that chunk produces blobs that look
-    // large enough but cannot be decoded by FFmpeg/PyAV. Keep the container
-    // header plus a bounded pre-speech tail.
-    if (this.chunks.length > maximum + 1) {
-      this.chunks.splice(1, this.chunks.length - maximum - 1)
-    }
-    return true
-  }
-
   requestFinalize(utteranceId: string) {
     if (utteranceId !== this.utteranceId || this.phase !== 'LISTENING') return false
     this.phase = 'FINALIZING'

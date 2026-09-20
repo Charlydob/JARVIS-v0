@@ -149,8 +149,11 @@ def _reminder_title(message: str) -> str:
     title = re.sub(r"(?i)^\s*(?:como\s+)?(?:un\s+)?recordatorio(?:\s+para)?\s*", "", title)
     title = re.sub(r"(?i)\b(?:hoy|mañana|este\s+|el\s+)?(?:lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b", " ", title)
     title = re.sub(r"(?i)\b(?:hoy|mañana)\b|\b20\d{2}-\d{2}-\d{2}\b", " ", title)
-    title = re.sub(r"(?i)\ba\s+las?\s+(?:\d{1,2}(?::\d{2})?|[a-záéíóúñ]+)(?:\s+y\s+(?:media|cuarto))?\b", " ", title)
-    title = re.sub(r"(?i)^\s*(?:para\s+)?(?:que\s+tengo\s+)?", "", title)
+    title = re.sub(
+        r"(?i)\ba\s+las?\s+(?:\d{1,2}(?::\d{2})?|[a-záéíóúñ]+)(?:\s+y\s+(?:media|cuarto))?(?:\s+de\s+la\s+(?:mañana|tarde|noche))?\b",
+        " ", title,
+    )
+    title = re.sub(r"(?i)^\s*(?:para\s+)?(?:(?:de\s+)?que\s+)?(?:tengo\s+)?", "", title)
     title = re.sub(r"\s+", " ", title).strip(" ¿?¡!,.-")
     return title or "Recordatorio"
 

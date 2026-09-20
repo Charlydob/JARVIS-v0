@@ -27,7 +27,6 @@ const REQUIRED_VOICE_FRAMES = 3
 const MIN_CAPTURE_MS = 650
 const MIN_SPEECH_MS = 350
 const MIN_AUDIO_BYTES = 1200
-const PRE_SPEECH_CHUNKS = 8
 const MAX_SPEECH_UTTERANCE_MS = 20_000
 
 let sharedMicrophone: MediaStream | undefined
@@ -351,7 +350,6 @@ export function useContinuousVoice({ enabled, paused, conversationState, onListe
         recorder.ondataavailable = (event) => {
           const utteranceId = finalizingUtteranceId ?? activeUtteranceId
           if (!utteranceId || !machine.addChunk(utteranceId, event.data)) return
-          if (!heardVoice && !finalizingUtteranceId) machine.retainRecentChunks(utteranceId, PRE_SPEECH_CHUNKS)
           if (machine.bufferedChunks() > 0) setCanFinalize(true)
         }
         recorder.onstop = () => { void handleStopped() }
