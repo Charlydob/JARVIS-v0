@@ -212,6 +212,19 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
             "content": note_create.group(2).strip(),
         }, domain="notes", operation="create")
 
+    note_update = re.search(r"(?is)\bmodifica\s+(.+?)\s+y\s+a[nñ]ade\s*[:：]\s*(.+)$", message)
+    if note_update:
+        return DirectIntent("note_update", "bookshell_notes_write", {
+            "action": "update", "title": note_update.group(1).strip(" ."),
+            "append_content": note_update.group(2).strip(),
+        }, domain="notes", operation="update")
+
+    note_open = re.search(r"(?is)\babre\s+mentalmente\s+(?:la\s+)?nota\s+(.+)$", message)
+    if note_open:
+        return DirectIntent("note_open", "bookshell_notes_query", {
+            "query": note_open.group(1).strip(" ."), "limit": 5,
+        }, domain="notes", operation="read")
+
     check_mark = re.search(r"(?is)\b(?:marca|completa)\s+(.+?)\s+(?:en|de)\s+(?:la\s+)?(?:nota\s+)?(.+)$", message)
     if check_mark and ("checklist" in text or "nota" in text):
         return DirectIntent("checklist_mark", "bookshell_notes_write", {
@@ -437,6 +450,8 @@ def render_direct_result(
     if kind in {"note_create", "note_update", "checklist_create", "checklist_mark"}:
         succeeded = (result.get("created") or result.get("updated")) and result.get("verified")
         return "Hecho y verificado en BookShell, señor." if succeeded else str(result.get("message") or "BookShell no confirmó la nota, señor.")
+    if kind == "note_open":
+        return "Nota localizada, señor." if result.get("items") else "No encuentro esa nota, señor."
     if kind == "checklist_pending":
         items = [str(item.get("item")) for item in result.get("pendingItems") or []]
         return ("Quedan pendientes: " + "; ".join(items) + ", señor.") if items else "No queda ningún elemento pendiente, señor."

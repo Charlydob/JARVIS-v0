@@ -97,6 +97,12 @@ def test_book_note_and_checklist_writes_are_deterministic() -> None:
     )
     assert note.tool == "bookshell_notes_write"
     assert note.arguments["content"] == "Primera línea"
+    update = route_direct_intent(
+        "Modifica Prueba integración JARVIS y añade: segunda línea", today,
+    )
+    assert update.arguments == {
+        "action": "update", "title": "Prueba integración JARVIS", "append_content": "segunda línea",
+    }
     checklist = route_direct_intent(
         "Crea una checklist llamada Checklist laboratorio con los puntos: conectar ESP32, probar relé, revisar fuente", today,
     )

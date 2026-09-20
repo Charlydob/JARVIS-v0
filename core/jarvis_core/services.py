@@ -562,13 +562,29 @@ class JarvisServices:
         direct = route_direct_intent(routing_message, today, local_now)
         if direct is None and re.search(r"\besa\s+nota\b", normalized_message) and re.search(r"\b(anade|agrega|incorpora)\b", normalized_message):
             recent_note = self._recent_notes.get(conversation_id)
-            added = re.search(r"(?is)(?:linea|contenido)\s*(?::|que\s+diga)?\s*(.+)$", message)
+            added = re.search(r"(?is)(?:l[ií]nea|contenido)\s*(?::|que\s+diga)?\s*(.+)$", message)
             if recent_note and time.monotonic() - recent_note[1] <= 300 and added:
                 note = recent_note[0]
                 direct = DirectIntent(
                     "note_update", "bookshell_notes_write",
                     {"action": "update", "note_id": note.get("id"), "append_content": added.group(1).strip()},
                     domain="notes", operation="update",
+                )
+        if direct is None:
+            recent_note = self._recent_notes.get(conversation_id)
+            note = recent_note[0] if recent_note and time.monotonic() - recent_note[1] <= 300 else None
+            mark_item = re.search(r"(?is)\bmarca\s+(.+?)\s+como\s+hecho", message)
+            if note and mark_item:
+                direct = DirectIntent(
+                    "checklist_mark", "bookshell_notes_write",
+                    {"action": "update", "note_id": note.get("id"), "check_item": mark_item.group(1).strip()},
+                    domain="notes", operation="update",
+                )
+            elif note and re.search(r"\b(?:y\s+)?que\s+(?:falta|queda)\b", normalized_message):
+                direct = DirectIntent(
+                    "checklist_pending", "bookshell_notes_query",
+                    {"query": note.get("title") or "", "pending_only": True, "limit": 10},
+                    domain="notes", operation="read",
                 )
         if direct is None and re.search(r"\b(?:muestrame|abre)\s+(?:la\s+)?fuente\b", normalized_message):
             assistant_text = next((str(item.get("content") or "") for item in reversed(previous) if item.get("role") == "assistant"), "")
@@ -736,6 +752,8 @@ class JarvisServices:
                             if note:
                                 note.setdefault("id", parsed.get("id"))
                                 self._recent_notes[conversation_id] = (note, time.monotonic())
+                        if direct.kind == "note_open" and parsed.get("items"):
+                            self._recent_notes[conversation_id] = (parsed["items"][0], time.monotonic())
                         if len(self._action_results) > 200:
                             self._action_results.pop(next(iter(self._action_results)))
                 except Exception as exc:
