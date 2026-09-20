@@ -74,3 +74,31 @@ def test_reminder_without_time_asks_and_does_not_write() -> None:
 
     assert result == {"created": False, "clarificationRequired": True, "message": "¿A qué hora, señor?"}
     assert calls == 0
+
+
+def test_existing_book_is_marked_reading_without_duplicate_or_field_loss() -> None:
+    book = {
+        "title": "El extranjero", "author": "A. Camus", "currentPage": 0,
+        "pages": 123, "status": "planned", "genre": "Novela", "createdAt": 10, "updatedAt": 10,
+    }
+    writes: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal book
+        if request.url.path == "/jarvis/data/books/books" and request.method == "GET":
+            return httpx.Response(200, json={"ok": True, "data": {"camus-1": book}})
+        if request.url.path == "/jarvis/data/books/books/camus-1" and request.method == "PATCH":
+            patch = json.loads(request.content)
+            writes.append(patch)
+            book = {**book, **patch}
+            return httpx.Response(200, json={"ok": True, "data": book})
+        return httpx.Response(404, json={"error": "unexpected"})
+
+    client = BookShellClient(transport=httpx.MockTransport(handler))
+    result = asyncio.run(client.create_book({
+        "title": "El extranjero", "author": "Albert Camus", "current_page": 0, "status": "reading",
+    }))
+    assert result["updated"] is True and result["verified"] is True
+    assert result["book"]["id"] == "camus-1"
+    assert writes and writes[0]["status"] == "reading"
+    assert book["pages"] == 123 and book["genre"] == "Novela" and book["currentPage"] == 0

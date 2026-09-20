@@ -112,6 +112,29 @@ def test_book_note_and_checklist_writes_are_deterministic() -> None:
     ]
 
 
+def test_natural_notes_phrases_win_and_book_reading_is_an_upsert() -> None:
+    today = date(2026, 9, 20)
+    note = route_direct_intent("crea una nota montaje checkout", today)
+    assert (note.domain, note.kind, note.arguments) == (
+        "notes", "note_create", {"action": "create", "title": "montaje checkout", "content": ""},
+    )
+    checklist = route_direct_intent("crea un checklist Mejoras para JARVIS", today)
+    assert checklist.kind == "checklist_create"
+    assert checklist.arguments == {
+        "action": "create", "title": "Mejoras para JARVIS", "content": "", "tags": ["checklist"],
+    }
+    folder = route_direct_intent("crea una carpeta en notas llamada Mejoras para JARVIS", today)
+    assert (folder.kind, folder.tool, folder.arguments) == (
+        "note_folder_create", "bookshell_notes_folder_write",
+        {"action": "create", "name": "Mejoras para JARVIS"},
+    )
+    reading = route_direct_intent("estoy leyendo El extranjero de Albert Camus", today)
+    assert (reading.kind, reading.operation, reading.arguments) == (
+        "book_reading", "update",
+        {"title": "El extranjero", "author": "Albert Camus", "current_page": 0, "status": "reading"},
+    )
+
+
 def test_book_write_keeps_title_and_gym_write_wins_over_read() -> None:
     today = date(2026, 9, 19)
     book = route_direct_intent("Actualiza la página de Musashi. Voy en la 222.", today)

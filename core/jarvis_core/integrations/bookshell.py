@@ -55,7 +55,8 @@ class BookShellClient:
                 "request_path": path, "params": dict(params), "http_status": response.status_code,
                 "raw_result_summary": {"keys": sorted(raw_payload) if isinstance(raw_payload, dict) else [], "count": count},
             }
-            LOGGER.info(
+            log_method = LOGGER.info if method.upper() != "GET" or not response.is_success else LOGGER.debug
+            log_method(
                 "method=%s endpoint=%s params=%s request_json=%s http_status=%s raw_result_summary=%s",
                 method, path, json.dumps(dict(params), ensure_ascii=False),
                 json.dumps(request_json, ensure_ascii=False)[:2000] if request_json is not None else "null",
@@ -175,22 +176,49 @@ class BookShellClient:
             return {"created": False, "message": "La página actual supera el total indicado."}
         books = await self.books()
         author = str(arguments.get("author") or "").strip() or None
-        exact = next((
+        requested_status = str(arguments.get("status") or ("planned" if current_page == 0 else "reading"))
+        if requested_status not in {"planned", "reading", "finished"}:
+            requested_status = "planned" if current_page == 0 else "reading"
+        title_matches = [
             {"id": identifier, **book} for identifier, book in books.items()
             if isinstance(book, dict)
             and str(book.get("title") or "").strip().casefold() == title.casefold()
-            and str(book.get("author") or "").strip().casefold() == str(author or "").casefold()
+        ]
+        exact = title_matches[0] if len(title_matches) == 1 else next((
+            book for book in title_matches
+            if str(book.get("author") or "").strip().casefold() == str(author or "").casefold()
         ), None)
+        if len(title_matches) > 1 and exact is None:
+            return {
+                "created": False, "verified": False, "ambiguous": True,
+                "message": "Hay varios libros con ese título; necesito identificar cuál, señor.",
+            }
         if exact:
+            if requested_status == "reading":
+                if str(exact.get("status") or "").casefold() == "reading":
+                    return {
+                        "created": False, "updated": False, "alreadyCurrent": True,
+                        "verified": True, "duplicate": True, "book": self._summary(exact),
+                    }
+                write_started = time.perf_counter()
+                await self.patch_data(f"books/books/{exact['id']}", {"status": "reading", "updatedAt": now})
+                write_ms = (time.perf_counter() - write_started) * 1000
+                readback_started = time.perf_counter()
+                saved = (await self.books()).get(str(exact["id"]))
+                readback_ms = (time.perf_counter() - readback_started) * 1000
+                verified = bool(saved) and str(saved.get("status") or "").casefold() == "reading"
+                return {
+                    "created": False, "updated": verified, "verified": verified,
+                    "existing": True, "book": self._summary({"id": exact["id"], **(saved or exact)}),
+                    "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)},
+                    **({"message": "El estado del libro no aparece actualizado al volver a consultar BookShell."} if not verified else {}),
+                }
             return {"created": False, "verified": True, "duplicate": True, "book": self._summary(exact)}
         book_id = str(uuid4())
-        status = str(arguments.get("status") or ("planned" if current_page == 0 else "reading"))
-        if status not in {"planned", "reading", "finished"}:
-            status = "planned" if current_page == 0 else "reading"
         book = {
             "title": title, "author": author, "year": None, "pages": pages,
             "currentPage": current_page, "genre": None, "language": None,
-            "country": None, "countryLabel": None, "status": status,
+            "country": None, "countryLabel": None, "status": requested_status,
             "favorite": False, "finishedPast": False,
             "createdAt": now, "updatedAt": now,
         }

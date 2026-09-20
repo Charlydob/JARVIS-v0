@@ -186,6 +186,60 @@ def _reminder_delete_queries(message: str) -> list[str]:
 
 def route_direct_intent(message: str, today: date, now: datetime | None = None) -> DirectIntent | None:
     text = normalize(message)
+    # Explicit Notes nouns take precedence over generic verbs such as "crea" or
+    # "anota", which are also valid reminder verbs.
+    folder_create = re.search(
+        r"(?is)\bcrea\s+(?:una\s+)?carpeta\s+(?:en|de)\s+notas(?:\s+(?:llamada|titulada))?\s+(.+)$",
+        message,
+    )
+    if folder_create:
+        return DirectIntent("note_folder_create", "bookshell_notes_folder_write", {
+            "action": "create", "name": folder_create.group(1).strip(" ."),
+        }, domain="notes", operation="create")
+
+    checklist_create = re.search(
+        r"(?is)\bcrea\s+(?:un(?:a)?\s+)?(?:nota\s+(?:tipo\s+)?)?checklist"
+        r"(?:\s+(?:llamad[oa]|titulad[oa]))?\s+(.+?)"
+        r"(?:\s+(?:con\s+)?(?:los\s+)?(?:puntos|elementos|tareas)\s*[:：]\s*(.+))?$",
+        message,
+    )
+    if checklist_create:
+        raw_items = checklist_create.group(2) or ""
+        items = [
+            item.strip(" .") for item in re.split(r"\s*[,;]\s*|\s+y\s+(?=[^,;]+$)", raw_items, flags=re.I)
+            if item.strip(" .")
+        ]
+        return DirectIntent("checklist_create", "bookshell_notes_write", {
+            "action": "create", "title": checklist_create.group(1).strip(" ."),
+            "content": "\n".join(f"- [ ] {item}" for item in items), "tags": ["checklist"],
+        }, domain="notes", operation="create")
+
+    note_create_with_content = re.search(
+        r"(?is)\bcrea\s+(?:una\s+)?nota(?:\s+(?:llamada|titulada))?\s+(.+?)"
+        r"\s+(?:con\s+)?(?:el\s+)?contenido\s*[:：]?\s*(.+)$",
+        message,
+    )
+    if note_create_with_content:
+        return DirectIntent("note_create", "bookshell_notes_write", {
+            "action": "create", "title": note_create_with_content.group(1).strip(" ."),
+            "content": note_create_with_content.group(2).strip(),
+        }, domain="notes", operation="create")
+
+    note_create = re.search(
+        r"(?is)\bcrea\s+(?:una\s+)?nota(?:\s+(?:llamada|titulada))?\s+(.+)$", message,
+    )
+    if note_create:
+        return DirectIntent("note_create", "bookshell_notes_write", {
+            "action": "create", "title": note_create.group(1).strip(" ."), "content": "",
+        }, domain="notes", operation="create")
+
+    reading = re.search(r"(?is)\bestoy\s+leyendo\s+(.+?)\s+de\s+([^.,]+?)(?=\s*[.,]|$)", message)
+    if reading:
+        return DirectIntent("book_reading", "bookshell_create_book", {
+            "title": reading.group(1).strip(), "author": reading.group(2).strip(),
+            "current_page": 0, "status": "reading",
+        }, domain="books", operation="update")
+
     purchased = re.search(
         r"(?is)\bhe\s+comprado\s+(.+?)\s+de\s+([^.,]+?)(?=\s*[.,]|$)", message,
     )
@@ -196,21 +250,6 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
             "title": purchased.group(1).strip(), "author": purchased.group(2).strip(),
             "current_page": int(page_match.group(1)) if page_match else 0, "status": status,
         }, domain="books", operation="create")
-
-    checklist_create = re.search(r"(?is)\bcrea\s+(?:una\s+)?(?:nota\s+(?:tipo\s+)?)?checklist\s+(?:llamada|titulada)\s+(.+?)\s+(?:con\s+)?(?:los\s+)?(?:puntos|elementos|tareas)\s*[:：]?\s*(.+)$", message)
-    if checklist_create:
-        items = [item.strip(" .") for item in re.split(r"\s*[,;]\s*|\s+y\s+(?=[^,;]+$)", checklist_create.group(2), flags=re.I) if item.strip(" .")]
-        return DirectIntent("checklist_create", "bookshell_notes_write", {
-            "action": "create", "title": checklist_create.group(1).strip(" ."),
-            "content": "\n".join(f"- [ ] {item}" for item in items), "tags": ["checklist"],
-        }, domain="notes", operation="create")
-
-    note_create = re.search(r"(?is)\bcrea\s+(?:una\s+)?nota\s+(?:llamada|titulada)\s+(.+?)\s+(?:con\s+)?(?:el\s+)?contenido\s*[:：]?\s*(.+)$", message)
-    if note_create:
-        return DirectIntent("note_create", "bookshell_notes_write", {
-            "action": "create", "title": note_create.group(1).strip(" ."),
-            "content": note_create.group(2).strip(),
-        }, domain="notes", operation="create")
 
     note_update = re.search(r"(?is)\bmodifica\s+(.+?)\s+y\s+a[nñ]ade\s*[:：]\s*(.+)$", message)
     if note_update:
@@ -447,6 +486,15 @@ def render_direct_result(
         if result.get("duplicate"):
             return "Ese libro ya estaba en BookShell, señor."
         return "Libro añadido, señor." if result.get("created") and result.get("verified") else str(result.get("message") or "BookShell no confirmó el libro, señor.")
+    if kind == "book_reading":
+        book = result.get("book") or {}
+        if result.get("verified") and (result.get("created") or result.get("updated") or result.get("alreadyCurrent")):
+            return f"He marcado {book.get('title') or 'el libro'} como lectura actual, señor."
+        return str(result.get("message") or "BookShell no confirmó el estado del libro, señor.")
+    if kind == "note_folder_create":
+        if result.get("verified") and (result.get("created") or result.get("existing")):
+            return "Carpeta disponible y verificada en BookShell, señor."
+        return str(result.get("message") or "BookShell no confirmó la carpeta, señor.")
     if kind in {"note_create", "note_update", "checklist_create", "checklist_mark"}:
         succeeded = (result.get("created") or result.get("updated")) and result.get("verified")
         return "Hecho y verificado en BookShell, señor." if succeeded else str(result.get("message") or "BookShell no confirmó la nota, señor.")

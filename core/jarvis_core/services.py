@@ -9,6 +9,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
@@ -21,7 +22,7 @@ from edge_tts import VoicesManager
 from faster_whisper import WhisperModel
 from jarvis_core.config import CoreSettings
 from jarvis_core.feedback import FeedbackLearning
-from jarvis_core.intents import DirectIntent, continue_direct_intent, is_pending_field_response, is_pending_followup, render_direct_result, route_direct_intent
+from jarvis_core.intents import DirectIntent, continue_direct_intent, is_pending_field_response, render_direct_result, route_direct_intent
 from jarvis_core.language import SessionLanguagePolicy, response_language
 from jarvis_core.storage import Storage
 from jarvis_core.tools import ToolRegistry
@@ -361,7 +362,6 @@ class JarvisServices:
         self._turn_results: dict[str, tuple[dict[str, Any], float]] = {}
         self._turn_inflight: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._pending_intents: dict[str, PendingAction] = {}
-        self._recent_completed_intents: dict[str, tuple[DirectIntent, float]] = {}
         self._recent_query_intents: dict[str, tuple[DirectIntent, float]] = {}
         self._recent_notes: dict[str, tuple[dict[str, Any], float]] = {}
         self._action_locks: dict[str, asyncio.Lock] = {}
@@ -560,6 +560,24 @@ class JarvisServices:
             TOOL_LOGGER.info("turn_id=%s pending_action_expired=true pending_action_id=%s", turn_id, pending.id)
             pending = None
         direct = route_direct_intent(routing_message, today, local_now)
+        last_message_note = re.search(
+            r"(?is)\banota\s+este\s+[uú]ltimo\s+mensaje\s+en\s+(?:la\s+)?nota\s+(.+)$",
+            message,
+        )
+        if last_message_note:
+            assistant_text = next(
+                (str(item.get("content") or "") for item in reversed(previous) if item.get("role") == "assistant"),
+                "",
+            ).strip()
+            direct = DirectIntent(
+                "note_update", "bookshell_notes_write",
+                {
+                    "action": "update", "title": last_message_note.group(1).strip(" ."),
+                    "append_content": assistant_text,
+                },
+                clarification=None if assistant_text else "No hay un mensaje anterior de JARVIS que pueda anotar, señor.",
+                domain="notes", operation="update",
+            )
         if direct is None and re.search(r"\besa\s+nota\b", normalized_message) and re.search(r"\b(anade|agrega|incorpora)\b", normalized_message):
             recent_note = self._recent_notes.get(conversation_id)
             added = re.search(r"(?is)(?:l[ií]nea|contenido)\s*(?::|que\s+diga)?\s*(.+)$", message)
@@ -574,10 +592,17 @@ class JarvisServices:
             recent_note = self._recent_notes.get(conversation_id)
             note = recent_note[0] if recent_note and time.monotonic() - recent_note[1] <= 300 else None
             mark_item = re.search(r"(?is)\bmarca\s+(.+?)\s+como\s+hecho", message)
+            add_item = re.search(r"(?is)^\s*a[nñ]ade\s+(.+?)\s*[.!]?\s*$", message)
             if note and mark_item:
                 direct = DirectIntent(
                     "checklist_mark", "bookshell_notes_write",
                     {"action": "update", "note_id": note.get("id"), "check_item": mark_item.group(1).strip()},
+                    domain="notes", operation="update",
+                )
+            elif note and add_item and "checklist" in [str(tag).casefold() for tag in note.get("tags") or []]:
+                direct = DirectIntent(
+                    "checklist_mark", "bookshell_notes_write",
+                    {"action": "update", "note_id": note.get("id"), "append_content": f"- [ ] {add_item.group(1).strip(' .')}"},
                     domain="notes", operation="update",
                 )
             elif note and re.search(r"\b(?:y\s+)?que\s+(?:falta|queda)\b", normalized_message):
@@ -615,15 +640,6 @@ class JarvisServices:
                 turn_id, pending.id,
             )
             pending = None
-        elif direct is None and is_pending_followup(message):
-            completed = self._recent_completed_intents.get(conversation_id)
-            if completed and time.monotonic() - completed[1] <= 120:
-                replay = continue_direct_intent(completed[0], message, today, local_now)
-                if replay and replay.arguments and completed[0].arguments and (
-                    replay.arguments.get("target_time") == completed[0].arguments.get("target_time")
-                ):
-                    direct = replay
-                    pending_resumed = True
         routed = direct
         if routed and routed.domain:
             routed_arguments = routed.arguments or {}
@@ -649,6 +665,13 @@ class JarvisServices:
         )
         tools_used: list[str] = []
         tool_results: list[Any] = []
+        if self._requests_web_search(message) and not self.tools.has("web_search"):
+            answer = "No tengo búsqueda web configurada actualmente, señor."
+            await on_chunk(answer)
+            return self._store_chat_result(
+                conversation_id, message, answer, user_language, turn_id=turn_id,
+                tools_used=tools_used, tool_results=tool_results,
+            )
         required_read = self.tools.required_read_name(routing_message)
         if required_read and not self.tools.has(required_read):
             answer = f"La capacidad técnica {required_read} no está configurada en el Core, señor."
@@ -741,8 +764,6 @@ class JarvisServices:
                         )
                     if succeeded:
                         self._pending_intents.pop(conversation_id, None)
-                        if direct.kind == "reminder_create":
-                            self._recent_completed_intents[conversation_id] = (direct, time.monotonic())
                         if direct.domain == "reminders" and direct.operation in {"list", "search"}:
                             self._recent_query_intents[conversation_id] = (direct, time.monotonic())
                         if direct.kind in {"note_create", "note_update", "checklist_create", "checklist_mark"}:
@@ -763,7 +784,7 @@ class JarvisServices:
                     technical_cause = re.sub(r"\s+", " ", str(exc)).strip()[:240] or type(exc).__name__
                     answer = (
                         f"No se pudo guardar: {technical_cause}, señor."
-                        if direct.kind in {"book_update", "book_create", "reminder_create", "note_create", "note_update", "checklist_create", "checklist_mark"}
+                        if direct.kind in {"book_update", "book_create", "book_reading", "reminder_create", "note_create", "note_update", "note_folder_create", "checklist_create", "checklist_mark"}
                         else f"No he podido consultar BookShell: {technical_cause}, señor."
                     )
                 PERFORMANCE_LOGGER.info(
@@ -915,7 +936,7 @@ class JarvisServices:
                     ),
                 })
             else:
-                answer = str(decision.get("content", "")).strip()
+                answer = self._safe_user_answer(str(decision.get("content", "")).strip())
                 if self._claims_success(answer):
                     answer = "No he ejecutado esa acción. Necesito los datos requeridos para hacerlo."
                 if answer:
@@ -930,14 +951,29 @@ class JarvisServices:
         ollama_started = time.perf_counter()
         ollama_stage = "second_llm" if definitions else "ollama"
         first_token = True
+        streaming_safe = False
+        held_chunks: list[str] = []
         async for chunk in self.ollama.chat_stream(conversation, context):
             if first_token:
                 PERFORMANCE_LOGGER.info("turn_id=%s stage=%s_ttft duration_ms=%.1f", turn_id, ollama_stage, (time.perf_counter() - ollama_started) * 1000)
                 first_token = False
             chunks.append(chunk)
-            await on_chunk(chunk)
+            if streaming_safe:
+                await on_chunk(chunk)
+            else:
+                held_chunks.append(chunk)
+                prefix = "".join(held_chunks).lstrip()
+                # Hold JSON/code-fenced starts until the complete response can
+                # be classified; ordinary prose keeps true chunk streaming.
+                if prefix and not prefix.startswith(("{", "[", "```", "<tool", "tool_call")):
+                    streaming_safe = True
+                    for held in held_chunks:
+                        await on_chunk(held)
+                    held_chunks.clear()
         PERFORMANCE_LOGGER.info("turn_id=%s stage=%s_total duration_ms=%.1f", turn_id, ollama_stage, (time.perf_counter() - ollama_started) * 1000)
-        answer = "".join(chunks).strip()
+        answer = self._safe_user_answer("".join(chunks).strip())
+        if answer and not streaming_safe:
+            await on_chunk(answer)
         PERFORMANCE_LOGGER.info("turn_id=%s stage=total duration_ms=%.1f path=%s", turn_id, (time.perf_counter() - total_started) * 1000, "tool" if definitions else "fast")
         return self._store_chat_result(
             conversation_id, message, answer, user_language, turn_id=turn_id,
@@ -994,14 +1030,24 @@ class JarvisServices:
             if delete_all:
                 resolved.extend(items)
                 continue
-            normalized_query = unicodedata.normalize("NFKD", query.casefold()).encode("ascii", "ignore").decode()
+            normalized_query = self._reminder_match_text(query)
             matching = [
                 item for item in items
-                if normalized_query in unicodedata.normalize(
-                    "NFKD", str(item.get("title") or "").casefold(),
-                ).encode("ascii", "ignore").decode()
+                if normalized_query and normalized_query in self._reminder_match_text(item.get("title"))
             ]
-            candidates = matching or items
+            candidates = matching
+            if not candidates:
+                ranked = sorted(
+                    (
+                        (SequenceMatcher(None, normalized_query, self._reminder_match_text(item.get("title"))).ratio(), item)
+                        for item in items
+                    ),
+                    key=lambda pair: pair[0], reverse=True,
+                )
+                if ranked and ranked[0][0] >= 0.68 and (
+                    len(ranked) == 1 or ranked[0][0] - ranked[1][0] >= 0.12
+                ):
+                    candidates = [ranked[0][1]]
             if not candidates:
                 return f"No encuentro un recordatorio que coincida con «{query}», señor.", tools_used, tool_results
             if len(candidates) != 1:
@@ -1028,6 +1074,14 @@ class JarvisServices:
         return answer, tools_used, tool_results
 
     @staticmethod
+    def _reminder_match_text(value: Any) -> str:
+        normalized = unicodedata.normalize("NFKD", str(value or "").casefold()).encode("ascii", "ignore").decode()
+        tokens = re.findall(r"[a-z0-9]+", normalized)
+        aliases = {"apple": "apel"}
+        ignored = {"el", "la", "los", "las", "un", "una", "de", "del", "que", "me", "recordatorio"}
+        return " ".join(aliases.get(token, token) for token in tokens if token not in ignored)
+
+    @staticmethod
     def _tool_succeeded(result: str, tool_name: str = "") -> bool:
         try:
             payload = json.loads(result)
@@ -1039,9 +1093,12 @@ class JarvisServices:
             return False
         action_flags = [key for key in ("created", "updated", "stored", "deleted", "completed") if key in payload]
         successful = all(payload[key] is True for key in action_flags) if action_flags else True
+        if payload.get("verified") is True and any(payload.get(key) is True for key in ("existing", "duplicate", "alreadyCurrent")):
+            successful = True
         if tool_name in {
             "bookshell_update_progress", "bookshell_create_reminder", "bookshell_gym_write",
-            "bookshell_notes_write", "bookshell_finance_create",
+            "bookshell_create_book", "bookshell_notes_write", "bookshell_notes_folder_write",
+            "bookshell_finance_create",
         }:
             return successful and payload.get("verified") is True
         return successful
@@ -1073,12 +1130,46 @@ class JarvisServices:
     def _claims_success(answer: str) -> bool:
         return bool(re.search(r"\b(cread[oa]|actualizad[oa]|guardad[oa]|eliminad[oa]|completad[oa]|created|updated|saved|deleted)\b", answer.casefold()))
 
+    @staticmethod
+    def _requests_web_search(message: str) -> bool:
+        normalized = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode()
+        return bool(re.search(
+            r"\b(?:tienes|tiene)\s+internet\b|\b(?:busca|buscalo|buscar|consulta|consultalo)\b.*\b(?:internet|web)\b|\bweb\s+search\b",
+            normalized,
+        ))
+
+    @staticmethod
+    def _safe_user_answer(answer: str) -> str:
+        """Prevent model-emitted internal tool envelopes from reaching the UI."""
+        stripped = answer.strip()
+        fenced = re.sub(r"^```(?:json)?\s*|\s*```$", "", stripped, flags=re.IGNORECASE).strip()
+        fenced = re.sub(r"(?is)^<tool_call>\s*|\s*</tool_call>$", "", fenced).strip()
+        looks_internal = bool(re.search(
+            r'(?is)^\s*[\[{].*"(?:tool_calls?|parameters|arguments|function)"\s*:', fenced,
+        ))
+        if not looks_internal:
+            try:
+                payload = json.loads(fenced)
+            except (json.JSONDecodeError, TypeError):
+                payload = None
+            internal_keys = {"name", "tool", "tool_call", "tool_calls", "parameters", "arguments", "function"}
+            looks_internal = (
+                isinstance(payload, dict) and bool(internal_keys & set(payload))
+            ) or (
+                isinstance(payload, list)
+                and any(isinstance(item, dict) and bool(internal_keys & set(item)) for item in payload)
+            )
+        if looks_internal:
+            TOOL_LOGGER.warning("event=blocked_internal_tool_text")
+            return "No he podido ejecutar correctamente esa herramienta, señor."
+        return stripped
+
     def _store_chat_result(
         self, conversation_id: str, message: str, answer: str, fallback_language: str, *,
         turn_id: str | None = None, tools_used: list[str] | None = None,
         tool_results: list[Any] | None = None,
     ) -> dict[str, Any]:
-        answer = re.sub(r"^\s*assistant\s*:?\s*", "", answer, flags=re.IGNORECASE).strip()
+        answer = self._safe_user_answer(re.sub(r"^\s*assistant\s*:?\s*", "", answer, flags=re.IGNORECASE).strip())
         language = fallback_language
         normalized_message = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode()
         if REPAIR_PATTERN.search(normalized_message):

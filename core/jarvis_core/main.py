@@ -16,14 +16,26 @@ LOGGER = logging.getLogger("jarvis-core")
 INSTANCE_LOCK_PORT = 47651
 
 
+class CompactConsoleFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name in {"httpx", "httpcore", "httpcore.http11", "httpcore.connection"} and record.levelno < logging.WARNING:
+            return False
+        # Tool completion lines already carry total duration and verification;
+        # keep the detailed timing stages in core.log rather than duplicating them in PowerShell.
+        if record.name == "jarvis-core.performance" and record.levelno < logging.WARNING:
+            return False
+        return True
+
+
 def configure_logging(settings: CoreSettings) -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     log_path = Path(settings.data_dir) / "core.log"
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    formatter = logging.Formatter("[%(asctime)s] %(levelname)s %(name)s | %(message)s", datefmt="%H:%M:%S")
     console = logging.StreamHandler()
     console.setFormatter(formatter)
+    console.addFilter(CompactConsoleFilter())
     logfile = logging.FileHandler(log_path, encoding="utf-8")
-    logfile.setFormatter(formatter)
+    logfile.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     logging.basicConfig(level=settings.log_level, handlers=[console, logfile], force=True)
 
 

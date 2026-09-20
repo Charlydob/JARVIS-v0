@@ -91,6 +91,91 @@ async def test_complete_new_intent_cancels_incompatible_pending_action(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_completed_reminder_cannot_contaminate_next_notes_turn(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+    calls: list[tuple[str, dict]] = []
+
+    async def reminder(arguments):
+        calls.append(("reminder", dict(arguments)))
+        return {"created": True, "verified": True, "reminder": {"id": "r1"}}
+
+    async def note(arguments):
+        calls.append(("note", dict(arguments)))
+        return {
+            "created": True, "verified": True, "id": "n1",
+            "note": {"id": "n1", "title": arguments["title"], "content": arguments.get("content", "")},
+        }
+
+    services.tools.register(Tool("bookshell_create_reminder", "create", {"type": "object"}, reminder))
+    services.tools.register(Tool("bookshell_notes_write", "write", {"type": "object"}, note))
+
+    async def collect(_chunk: str) -> None:
+        return None
+
+    first = await services.chat_stream({
+        "message": "Recuérdame mañana a las 18:00 comprar leche",
+        "conversation_id": "closed-action", "turn_id": "closed-action-1",
+    }, collect)
+    second = await services.chat_stream({
+        "message": "crea una nota Mejoras para Jarvis",
+        "conversation_id": "closed-action", "turn_id": "closed-action-2",
+    }, collect)
+    assert first["message"] == "Recordatorio creado, señor."
+    assert second["message"] == "Hecho y verificado en BookShell, señor."
+    assert [name for name, _ in calls] == ["reminder", "note"]
+
+
+@pytest.mark.asyncio
+async def test_last_jarvis_message_is_appended_and_internal_json_is_blocked(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+    captured: list[dict] = []
+
+    async def note(arguments):
+        captured.append(dict(arguments))
+        return {"updated": True, "verified": True, "id": "bugs", "note": {"id": "bugs", "title": "Bugs de Jarvis"}}
+
+    services.tools.register(Tool("bookshell_notes_write", "write", {"type": "object"}, note))
+    responses = iter(["Mensaje anterior de JARVIS", '{"name":"bookshell_notes_write","parameters":{"action":"create"}}'])
+
+    async def fake_stream(_messages, _context=None):
+        yield next(responses)
+
+    services.ollama.chat_stream = fake_stream
+    chunks: list[str] = []
+
+    async def collect(chunk: str) -> None:
+        chunks.append(chunk)
+
+    await services.chat_stream({
+        "message": "dime algo", "conversation_id": "last-message", "turn_id": "last-message-1",
+    }, collect)
+    saved = await services.chat_stream({
+        "message": "anota este último mensaje en la nota Bugs de Jarvis",
+        "conversation_id": "last-message", "turn_id": "last-message-2",
+    }, collect)
+    leaked = await services.chat_stream({
+        "message": "otra cosa", "conversation_id": "last-message", "turn_id": "last-message-3",
+    }, collect)
+    assert captured[0]["append_content"] == "Mensaje anterior de JARVIS"
+    assert saved["message"] == "Hecho y verificado en BookShell, señor."
+    assert leaked["message"] == "No he podido ejecutar correctamente esa herramienta, señor."
+    assert not any('"parameters"' in chunk for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_web_search_capability_is_reported_from_registry(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+
+    async def collect(_chunk: str) -> None:
+        return None
+
+    result = await services.chat_stream({
+        "message": "búscalo en Internet", "turn_id": "web-missing-1",
+    }, collect)
+    assert result["message"] == "No tengo búsqueda web configurada actualmente, señor."
+
+
+@pytest.mark.asyncio
 async def test_silence_and_duplicate_utterance_are_discarded_before_ollama(tmp_path: Path) -> None:
     services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
     payload = {
@@ -317,6 +402,31 @@ async def test_reminder_delete_searches_then_verifies_one_candidate(tmp_path: Pa
     assert calls[0][0] == "query" and calls[0][1]["query"] == "paquete de Apple"
     assert calls[1] == ("update", {"reminder_id": "apple-1", "action": "cancel", "confirmed": True})
     assert "delete-reminder" not in services._pending_intents
+
+
+@pytest.mark.asyncio
+async def test_reminder_delete_accepts_clear_apple_stt_variant(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+    cancelled: list[str] = []
+
+    async def query(_arguments):
+        return {"items": [{"id": "apple-1", "title": "Llega el paquete de Apple"}], "count": 1}
+
+    async def update(arguments):
+        cancelled.append(arguments["reminder_id"])
+        return {"updated": True, "verified": True}
+
+    services.tools.register(Tool("bookshell_reminders_query", "query", {"type": "object"}, query))
+    services.tools.register(Tool("bookshell_reminder_update", "update", {"type": "object"}, update))
+
+    async def collect(_chunk: str) -> None:
+        return None
+
+    result = await services.chat_stream({
+        "message": "elimina el recordatorio del paquete de apel", "turn_id": "delete-apel-1",
+    }, collect)
+    assert result["message"] == "Recordatorio eliminado, señor."
+    assert cancelled == ["apple-1"]
 
 
 @pytest.mark.asyncio

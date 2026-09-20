@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import secrets
 from contextlib import asynccontextmanager
 from typing import Any
@@ -16,8 +17,25 @@ VERSION = "0.2.0"
 settings = get_settings()
 
 
+class CompactAccessFilter(logging.Filter):
+    """Hide successful health/status polling while preserving writes and errors."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            _client, method, path, _http_version, status_code = record.args
+            clean_path = str(path).split("?", 1)[0]
+            return not (
+                str(method).upper() == "GET"
+                and clean_path in {"/api/health", "/api/status"}
+                and 200 <= int(status_code) < 300
+            )
+        except (TypeError, ValueError):
+            return True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logging.getLogger("uvicorn.access").addFilter(CompactAccessFilter())
     app.state.relay = CoreRelay(timeout=settings.core_timeout_seconds)
     yield
 

@@ -144,6 +144,51 @@ def test_note_followup_and_checklist_use_visible_persisted_content() -> None:
     assert [item["item"] for item in pending["pendingItems"]] == ["conectar ESP32", "revisar fuente"]
 
 
+def test_note_folder_create_is_idempotent_and_read_back() -> None:
+    client = FakeClient({"notes/folders": {}})
+    domains = BookShellDomains(client)
+    created = asyncio.run(domains.notes_folder_write({"action": "create", "name": "Mejoras para JARVIS"}))
+    repeated = asyncio.run(domains.notes_folder_write({"action": "create", "name": "mejoras para jarvis"}))
+    queried = asyncio.run(domains.notes_folders_query({"query": "Mejoras para JARVIS"}))
+    assert created["created"] is True and created["verified"] is True
+    assert repeated["existing"] is True and repeated["verified"] is True
+    assert queried["count"] == 1
+    assert queried["items"][0]["name"] == "Mejoras para JARVIS"
+
+
+def test_note_create_verifies_canonical_visible_fields() -> None:
+    client = FakeClient({"notes/folders": {"jarvis": {"name": "Jarvis", "createdAt": 1}}, "notes/notes": {}})
+    result = asyncio.run(BookShellDomains(client).notes_write({
+        "action": "create", "title": "montaje checkout", "content": "",
+    }))
+    saved = client.values["notes/notes"][result["id"]]
+    assert result["created"] is True and result["verified"] is True
+    assert {key: saved[key] for key in ("title", "name", "folderId", "content", "type", "noteKind")} == {
+        "title": "montaje checkout", "name": "montaje checkout", "folderId": "jarvis",
+        "content": "", "type": "note", "noteKind": "text",
+    }
+
+
+def test_blank_checklist_can_add_mark_and_query_persisted_items() -> None:
+    client = FakeClient({"notes/folders": {"jarvis": {"name": "Jarvis"}}, "notes/notes": {}})
+    domains = BookShellDomains(client)
+    created = asyncio.run(domains.notes_write({
+        "action": "create", "title": "Mejoras para JARVIS", "content": "", "tags": ["checklist"],
+    }))
+    asyncio.run(domains.notes_write({
+        "action": "update", "note_id": created["id"], "append_content": "- [ ] mejorar STT",
+    }))
+    asyncio.run(domains.notes_write({
+        "action": "update", "note_id": created["id"], "append_content": "- [ ] wake word",
+    }))
+    marked = asyncio.run(domains.notes_write({
+        "action": "update", "note_id": created["id"], "check_item": "mejorar STT",
+    }))
+    pending = asyncio.run(domains.notes_query({"query": "Mejoras para JARVIS", "pending_only": True}))
+    assert marked["updated"] is True and marked["verified"] is True
+    assert [item["item"] for item in pending["pendingItems"]] == ["wake word"]
+
+
 def test_cancel_reminder_requires_explicit_confirmation() -> None:
     result = asyncio.run(BookShellDomains(FakeClient({})).reminder_update({"reminder_id": "r1", "action": "cancel"}))
     assert result["confirmationRequired"] is True

@@ -390,6 +390,48 @@ class BookShellDomains:
         verified = bool(saved)
         return {"created": verified, "verified": verified, "item": saved or item, "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}}
 
+    async def notes_folders_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        folders = await self.client.data("notes/folders") or {}
+        rows = [{"id": key, **value} for key, value in folders.items() if isinstance(value, dict)]
+        query = _norm(arguments.get("query"))
+        if query:
+            rows = [row for row in rows if query in _norm(row.get("name"))]
+        rows.sort(key=lambda row: int(row.get("createdAt") or 0))
+        return {"items": rows[: min(50, int(arguments.get("limit") or 10))], "count": len(rows)}
+
+    async def notes_folder_write(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        name = str(arguments.get("name") or "").strip()
+        if not name:
+            return {"created": False, "clarificationRequired": True, "message": "Falta el nombre de la carpeta."}
+        folders = await self.client.data("notes/folders") or {}
+        existing = next((
+            {"id": key, **value} for key, value in folders.items()
+            if isinstance(value, dict) and _norm(value.get("name")) == _norm(name)
+        ), None)
+        if existing:
+            return {"created": False, "existing": True, "verified": True, "folder": existing}
+        now = int(time.time() * 1000)
+        folder_id = str(uuid4())
+        folder = {
+            "name": name, "color": "#00d4ff", "createdAt": now,
+            "parentId": "", "isPrivate": False, "pin": "", "emoji": "📁",
+            "category": "", "tags": [], "defaultNoteKind": "text",
+        }
+        write_started = time.perf_counter()
+        await self.client.put_data(f"notes/folders/{folder_id}", folder)
+        write_ms = (time.perf_counter() - write_started) * 1000
+        readback_started = time.perf_counter()
+        persisted = await self.client.data("notes/folders") or {}
+        readback_ms = (time.perf_counter() - readback_started) * 1000
+        saved = persisted.get(folder_id)
+        verified = bool(saved) and _norm(saved.get("name")) == _norm(name)
+        return {
+            "created": verified, "verified": verified, "id": folder_id,
+            "folder": {"id": folder_id, **(saved or folder)},
+            "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)},
+            **({"message": "La carpeta no aparece al volver a consultar BookShell."} if not verified else {}),
+        }
+
     async def notes_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
         notes = await self.client.data("notes/notes") or {}
         rows = [{"id": key, **value} for key, value in notes.items() if isinstance(value, dict)]
@@ -413,21 +455,6 @@ class BookShellDomains:
         now = int(time.time() * 1000)
         action = str(arguments.get("action") or "create")
         allowed = {key: arguments[key] for key in ("title", "content", "category", "folderId", "tags") if arguments.get(key) is not None}
-        folders = await self.client.data("notes/folders") or {}
-        folder_id = str(allowed.get("folderId") or "").strip()
-        if not folder_id:
-            folder_id = next((
-                key for key, value in folders.items()
-                if isinstance(value, dict) and str(value.get("name") or "").strip().casefold() == "jarvis"
-            ), "")
-        if not folder_id:
-            folder_id = str(uuid4())
-            await self.client.put_data(f"notes/folders/{folder_id}", {
-                "name": "JARVIS", "color": "#00d4ff", "createdAt": now,
-                "parentId": "", "isPrivate": False, "pin": "", "emoji": "📝",
-                "category": "", "tags": [], "defaultNoteKind": "text",
-            })
-        allowed["folderId"] = folder_id
         if action == "update":
             note_id = str(arguments.get("note_id") or "")
             persisted_before = await self.client.data("notes/notes") or {}
@@ -439,6 +466,10 @@ class BookShellDomains:
             if not note_id:
                 return {"updated": False, "clarificationRequired": True, "message": "Falta identificar la nota."}
             current_note = persisted_before.get(note_id) or {}
+            if not current_note:
+                return {"updated": False, "verified": False, "message": "No encuentro esa nota."}
+            if "title" in allowed:
+                allowed["name"] = str(allowed["title"])
             if arguments.get("append_content"):
                 existing = str(current_note.get("content") or "").rstrip()
                 added = str(arguments.get("append_content") or "").strip()
@@ -462,9 +493,31 @@ class BookShellDomains:
             readback_ms = (time.perf_counter() - readback_started) * 1000
             saved = persisted.get(note_id)
             verified = bool(saved) and all(saved.get(key) == value for key, value in allowed.items())
-            return {"updated": verified, "verified": verified, "id": note_id, "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}}
-        note_id = str(uuid4())
+            return {
+                "updated": verified, "verified": verified, "id": note_id,
+                "note": {"id": note_id, **saved} if saved else {},
+                "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)},
+                **({"message": "La nota no coincide al volver a consultar BookShell."} if not verified else {}),
+            }
         title = str(allowed.get("title") or "").strip()
+        if not title:
+            return {"created": False, "clarificationRequired": True, "message": "Falta el título de la nota."}
+        folders = await self.client.data("notes/folders") or {}
+        folder_id = str(allowed.get("folderId") or "").strip()
+        if not folder_id:
+            folder_id = next((
+                key for key, value in folders.items()
+                if isinstance(value, dict) and _norm(value.get("name")) == "jarvis"
+            ), "")
+        if not folder_id:
+            folder_id = str(uuid4())
+            await self.client.put_data(f"notes/folders/{folder_id}", {
+                "name": "Jarvis", "color": "#00d4ff", "createdAt": now,
+                "parentId": "", "isPrivate": False, "pin": "", "emoji": "📝",
+                "category": "", "tags": [], "defaultNoteKind": "text",
+            })
+        allowed["folderId"] = folder_id
+        note_id = str(uuid4())
         note = {
             "folderId": folder_id, "title": title, "name": title,
             "content": str(allowed.get("content") or "").strip(), "linkRefs": [],
@@ -481,7 +534,12 @@ class BookShellDomains:
         persisted = await self.client.data("notes/notes") or {}
         readback_ms = (time.perf_counter() - readback_started) * 1000
         saved = persisted.get(note_id)
-        verified = bool(saved)
+        verified = bool(saved) and all(
+            saved.get(key) == expected for key, expected in {
+                "title": title, "name": title, "folderId": folder_id,
+                "content": note["content"], "type": "note", "noteKind": "text",
+            }.items()
+        )
         return {"created": verified, "verified": verified, "id": note_id, "note": saved or note, "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}}
 
     async def recipes_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -631,6 +689,8 @@ def register_domain_tools(registry: ToolRegistry, domains: BookShellDomains) -> 
     registry.register(Tool("bookshell_world_query", "Busca lugares guardados, locales, geografía o estancias por nombre, ciudad, categoría o país, incluyendo valoraciones.", {"type": "object", "properties": {"scope": {"type": "string", "enum": ["all", "saved", "places", "geography", "stays"]}, "query": {"type": "string"}, "city": {"type": "string"}, "category": {"type": "string"}, "country": {"type": "string"}, "limit": {"type": "integer"}}}, domains.world_query))
     registry.register(Tool("bookshell_world_write", "Guarda o actualiza un lugar/local en BookShell; no elimina datos.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "scope": {"type": "string", "enum": ["saved", "places", "geography"]}, "item_id": {"type": "string"}, "name": {"type": "string"}, "category": {"type": "string"}, "city": {"type": "string"}, "country": {"type": "string"}, "address": {"type": "string"}, "note": {"type": "string"}, "rating": {"type": "number"}, "lat": {"type": "number"}, "lon": {"type": "number"}}, "required": ["action", "scope"]}, domains.world_write))
     registry.register(Tool("bookshell_notes_query", "Busca notas o elementos pendientes de una checklist.", {"type": "object", "properties": {"query": {"type": "string"}, "pending_only": {"type": "boolean"}, "limit": {"type": "integer"}}}, domains.notes_query))
+    registry.register(Tool("bookshell_notes_folders_query", "Busca carpetas de Notes por nombre.", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, domains.notes_folders_query))
+    registry.register(Tool("bookshell_notes_folder_write", "Crea una carpeta de Notes si no existe y verifica su persistencia.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create"]}, "name": {"type": "string"}}, "required": ["action", "name"]}, domains.notes_folder_write))
     registry.register(Tool("bookshell_notes_write", "Crea o actualiza una nota visible en BookShell; admite checklists Markdown persistentes y no elimina notas.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "note_id": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}, "append_content": {"type": "string"}, "check_item": {"type": "string"}, "category": {"type": "string"}, "folderId": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["action"]}, domains.notes_write))
     registry.register(Tool("bookshell_recipes_query", "Busca recetas y devuelve ingredientes, pasos y detalles reales.", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, domains.recipes_query))
     registry.register(Tool("bookshell_recipes_write", "Crea o actualiza una receta básica cuando ingredientes/pasos están claros; no elimina recetas.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "recipe_id": {"type": "string"}, "title": {"type": "string"}, "notes": {"type": "string"}, "meal": {"type": "string"}, "servings": {"type": "integer"}, "tags": {"type": "array", "items": {"type": "string"}}, "ingredients": {"type": "array", "items": {"type": "object"}}, "steps": {"type": "array", "items": {"type": "object"}}}, "required": ["action"]}, domains.recipes_write))
