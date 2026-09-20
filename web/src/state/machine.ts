@@ -24,7 +24,7 @@ const transitions: Record<JarvisState, Partial<Record<JarvisEvent['type'], Jarvi
   idle: { ...activeTransitions, START_LISTENING: 'listening', SUBMIT: 'thinking' },
   listening: { ...activeTransitions, SUBMIT: 'thinking' },
   thinking: { ...activeTransitions, RESPONSE: 'speaking', EMPTY_AUDIO: 'listening' },
-  speaking: { ...activeTransitions, SPEECH_END: 'listening' },
+  speaking: { ...activeTransitions, SPEECH_END: 'listening', SUBMIT: 'thinking' },
   muted: { CORE_OFFLINE: 'sleeping', UNMUTE: 'idle' },
   error: { CORE_OFFLINE: 'sleeping', MUTE: 'muted', RESET: 'idle', START_LISTENING: 'listening' }
 }

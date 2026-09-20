@@ -19,6 +19,7 @@ import type { AudioCaptureMetadata } from './api/client'
 import { JarvisState, stateLabels, transition } from './state/machine'
 import { takeSpeechSegments } from './speech'
 import { PrefetchedSpeechQueue } from './speechQueue'
+import { parseSpeechInterrupt } from './speechInterrupt'
 import { copyPlainText, formatHistorySelection } from './historyExport'
 
 type View = 'face' | 'dashboard'
@@ -47,6 +48,11 @@ function cleanAssistantText(value: string) {
 const speechAudio = new Audio()
 speechAudio.preload = 'auto'
 let speechUnlocked = false
+let activeSpeechCancellation: (() => void) | undefined
+
+function cancelSpeechPlayback() {
+  activeSpeechCancellation?.()
+}
 
 function silentWav(): Blob {
   const sampleRate = 8000
@@ -89,18 +95,34 @@ function playAudio(blob: Blob, onPlayback: (playing: boolean) => void): Promise<
     const finish = (error?: unknown) => {
       if (settled) return
       settled = true
+      if (activeSpeechCancellation === cancel) activeSpeechCancellation = undefined
+      speechAudio.onended = null
+      speechAudio.onerror = null
       onPlayback(false)
       restoreCapture()
       URL.revokeObjectURL(url)
       if (error) reject(error)
       else resolve()
     }
+    const cancel = () => {
+      speechAudio.pause()
+      speechAudio.removeAttribute('src')
+      speechAudio.load()
+      finish()
+    }
+    activeSpeechCancellation = cancel
     speechAudio.pause()
     speechAudio.src = url
     speechAudio.volume = 1
     speechAudio.onended = () => finish()
     speechAudio.onerror = () => { speechUnlocked = false; finish(new Error('No se pudo reproducir la voz')) }
-    speechAudio.play().then(() => onPlayback(true)).catch((error) => { speechUnlocked = false; finish(error) })
+    speechAudio.play()
+      .then(() => { if (!settled) onPlayback(true) })
+      .catch((error) => {
+        if (settled) return
+        speechUnlocked = false
+        finish(error)
+      })
   })
 }
 
@@ -132,7 +154,10 @@ export default function App() {
   const onlineRef = useRef(false)
   const statusCheckedRef = useRef(false)
   const activeTurnRef = useRef<string>()
+  const activeSpeechQueueRef = useRef<PrefetchedSpeechQueue<Blob>>()
+  const speechEpochRef = useRef(0)
   const processingAudioRef = useRef(false)
+  const processingInterruptRef = useRef(false)
   const recentTranscriptRef = useRef<{ text: string; at: number }>()
   const busy = state === 'thinking' || state === 'speaking'
   const historyByDay = useMemo(() => {
@@ -226,17 +251,28 @@ export default function App() {
     if (noticeRef.current) noticeRef.current.scrollTop = noticeRef.current.scrollHeight
   }, [notice])
 
+  const cancelActiveSpeech = useCallback(() => {
+    speechEpochRef.current += 1
+    activeSpeechQueueRef.current?.cancel()
+    activeSpeechQueueRef.current = undefined
+    activeTurnRef.current = undefined
+    cancelSpeechPlayback()
+    setAudioPlaying(false)
+  }, [])
+
   const runConversation = useCallback(async (
     message: string, language?: string, languageConfidence?: number, requestedTurnId?: string,
-    onSpeaking?: () => void,
   ) => {
     const cleanMessage = message.trim()
     if (!cleanMessage || !coreOnline) return
     if (activeTurnRef.current) return
     const turnId = requestedTurnId || crypto.randomUUID()
+    const speechEpoch = speechEpochRef.current + 1
+    speechEpochRef.current = speechEpoch
     activeTurnRef.current = turnId
     dispatch({ type: 'SUBMIT' })
     setNotice(cleanMessage)
+    let turnSpeechQueue: PrefetchedSpeechQueue<Blob> | undefined
     try {
       const shouldSpeak = soundEnabled && voiceReady && !muted
       let fullText = ''
@@ -249,6 +285,8 @@ export default function App() {
         play: (speech) => playAudio(speech, setAudioPlaying),
         onError: () => { speechFailed = true },
       })
+      turnSpeechQueue = speechQueue
+      activeSpeechQueueRef.current = speechQueue
 
       const queueSpeech = (flush = false) => {
         if (!shouldSpeak) return
@@ -258,18 +296,19 @@ export default function App() {
       }
 
       const response = await streamMessage(cleanMessage, conversationId.current, location, language, languageConfidence, turnId, (chunk) => {
+        if (speechEpoch !== speechEpochRef.current) return
         fullText += chunk
         setNotice(cleanAssistantText(fullText))
         if (!responseStarted) {
           responseStarted = true
           dispatch({ type: 'RESPONSE' })
-          if (shouldSpeak) onSpeaking?.()
         }
         if (shouldSpeak) {
           speechBuffer += chunk
           queueSpeech()
         }
       })
+      if (speechEpoch !== speechEpochRef.current) return
       conversationId.current = response.conversation_id
       sessionLanguage.current = response.language || sessionLanguage.current
       setLatestResponse({ id: response.message_id, rating: null })
@@ -280,6 +319,7 @@ export default function App() {
       if (shouldSpeak) {
         queueSpeech(true)
         await speechQueue.drain()
+        if (speechEpoch !== speechEpochRef.current) return
         if (speechFailed) {
           setVoiceReady(false)
           setNotice(`${fullText}\nToca la boca para volver a activar la voz.`)
@@ -289,10 +329,12 @@ export default function App() {
       }
       dispatch({ type: 'SPEECH_END' })
     } catch (error) {
+      if (speechEpoch !== speechEpochRef.current) return
       setAudioPlaying(false)
       setNotice(error instanceof Error ? error.message : 'No he podido completar la solicitud')
       dispatch({ type: 'FAIL' })
     } finally {
+      if (activeSpeechQueueRef.current === turnSpeechQueue) activeSpeechQueueRef.current = undefined
       if (activeTurnRef.current === turnId) activeTurnRef.current = undefined
     }
   }, [coreOnline, location, muted, refreshHistory, soundEnabled, voiceReady])
@@ -347,9 +389,9 @@ export default function App() {
         return
       }
       recentTranscriptRef.current = { text: normalized, at: Date.now() }
-      await runConversation(
+      void runConversation(
         transcription.transcript, transcription.language, transcription.languageConfidence,
-        crypto.randomUUID(), lifecycle.speaking,
+        crypto.randomUUID(),
       )
     } catch (error) {
       console.warn('No se pudo transcribir la grabación', error)
@@ -360,12 +402,46 @@ export default function App() {
     }
   }, [runConversation])
 
+  const processInterruptAudio = useCallback(async (
+    audio: Blob, metadata: AudioCaptureMetadata,
+  ) => {
+    if (processingInterruptRef.current) return
+    processingInterruptRef.current = true
+    try {
+      const transcription = await transcribeAudio(
+        audio, metadata, metadata.utteranceId, conversationId.current,
+      )
+      const interruption = parseSpeechInterrupt(transcription.transcript)
+      console.info('[JARVIS voice]', {
+        utterance_id: metadata.utteranceId,
+        event: 'interrupt_transcript',
+        transcript: transcription.transcript,
+        interrupt_action: interruption.kind,
+      })
+      if (interruption.kind === 'ignore') return
+      cancelActiveSpeech()
+      dispatch({ type: 'SPEECH_END' })
+      setNotice('Estoy escuchando')
+      if (interruption.kind === 'message') {
+        void runConversation(
+          interruption.message, transcription.language, transcription.languageConfidence,
+          crypto.randomUUID(),
+        )
+      }
+    } catch (error) {
+      console.warn('No se pudo comprobar la interrupción', error)
+    } finally {
+      processingInterruptRef.current = false
+    }
+  }, [cancelActiveSpeech, runConversation])
+
   const voiceCapture = useContinuousVoice({
     enabled: coreOnline && !muted && view === 'face' && state !== 'error',
     paused: busy,
     conversationState: state,
     onListening: useCallback(() => dispatch({ type: 'START_LISTENING' }), []),
     onUtterance: useCallback((audio, metadata, lifecycle) => processAudio(audio, metadata, lifecycle), [processAudio]),
+    onInterruptUtterance: useCallback((audio, metadata) => processInterruptAudio(audio, metadata), [processInterruptAudio]),
     onError: useCallback((message) => { setNotice(message); dispatch({ type: 'FAIL' }) }, [])
   })
 

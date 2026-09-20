@@ -39,4 +39,26 @@ describe('prefetched speech queue', () => {
     expect(preparedDuringFirstPlayback).toBeGreaterThan(0)
     expect(overlap).toBe(false)
   })
+
+  it('invalidates every pending segment from a cancelled turn', async () => {
+    const played: number[] = []
+    let releaseFirst!: () => void
+    const firstPlayback = new Promise<void>((resolve) => { releaseFirst = resolve })
+    const queue = new PrefetchedSpeechQueue<number>({
+      synthesize: async (text) => Number(text),
+      play: async (audio) => {
+        played.push(audio)
+        if (audio === 1) await firstPlayback
+      },
+      wait: async () => undefined,
+    })
+    queue.enqueue({ text: '1', boundary: 'sentence', pauseAfterMs: 0 })
+    queue.enqueue({ text: '2', boundary: 'sentence', pauseAfterMs: 0 })
+    queue.enqueue({ text: '3', boundary: 'sentence', pauseAfterMs: 0 })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    queue.cancel()
+    releaseFirst()
+    await queue.drain()
+    expect(played).toEqual([1])
+  })
 })

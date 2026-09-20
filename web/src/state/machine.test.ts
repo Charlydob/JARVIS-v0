@@ -16,4 +16,8 @@ describe('Jarvis state machine', () => {
     expect(transition('muted', { type: 'UNMUTE' })).toBe('idle')
     expect(transition('muted', { type: 'CORE_OFFLINE' })).toBe('sleeping')
   })
+
+  it('accepts an intentional replacement turn while speaking', () => {
+    expect(transition('speaking', { type: 'SUBMIT' })).toBe('thinking')
+  })
 })
