@@ -73,4 +73,16 @@ describe('voice capture state machine', () => {
     expect(await chunks[10].text()).toBe('chunk-9')
     expect(await chunks.at(-1)?.text()).toBe('chunk-19')
   })
+
+  it('progresses one valid finalizing utterance to processing exactly once', () => {
+    const machine = new VoiceCaptureMachine()
+    expect(machine.start('watchdog')).toBe(true)
+    machine.addChunk('watchdog', new Blob(['valid-audio']))
+    expect(machine.requestFinalize('watchdog')).toBe(true)
+    expect(machine.takeFinalizedChunks('watchdog')).toHaveLength(1)
+    expect(machine.takeFinalizedChunks('watchdog')).toHaveLength(0)
+    expect(machine.processing('watchdog')).toBe(true)
+    expect(machine.processing('watchdog')).toBe(false)
+    expect(machine.phase).toBe('PROCESSING')
+  })
 })

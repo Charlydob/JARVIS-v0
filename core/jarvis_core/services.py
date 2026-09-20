@@ -8,7 +8,7 @@ import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
@@ -360,6 +360,7 @@ class JarvisServices:
         self._turn_inflight: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._pending_intents: dict[str, PendingAction] = {}
         self._recent_completed_intents: dict[str, tuple[DirectIntent, float]] = {}
+        self._recent_query_intents: dict[str, tuple[DirectIntent, float]] = {}
         self._action_locks: dict[str, asyncio.Lock] = {}
         self._action_results: dict[str, str] = {}
 
@@ -556,6 +557,10 @@ class JarvisServices:
             TOOL_LOGGER.info("turn_id=%s pending_action_expired=true pending_action_id=%s", turn_id, pending.id)
             pending = None
         direct = route_direct_intent(routing_message, today, local_now)
+        if direct is None:
+            recent_query = self._recent_query_intents.get(conversation_id)
+            if recent_query and time.monotonic() - recent_query[1] <= 120:
+                direct = self._contextual_reminder_followup(recent_query[0], message, today)
         pending_resumed = False
         if pending is not None and is_pending_field_response(pending.intent, message):
             direct = continue_direct_intent(pending.intent, message, today, local_now)
@@ -591,7 +596,7 @@ class JarvisServices:
         # Complex reminder mutations remain on the existing tool-selection path after
         # their domain and operation have been classified. Direct execution is reserved
         # for deterministic create/list/search operations.
-        if direct and direct.tool is None and direct.clarification is None:
+        if direct and direct.tool is None and direct.clarification is None and direct.kind != "reminder_delete":
             direct = None
         PERFORMANCE_LOGGER.info(
             "turn_id=%s stage=intent_routing duration_ms=%.1f direct=%s",
@@ -636,6 +641,11 @@ class JarvisServices:
                     ",".join(direct.missing_fields) or "none", pending_action.id,
                     pending_action.expected_field, pending_action.originating_turn,
                 )
+            elif direct.kind == "reminder_delete":
+                answer, delete_tools, delete_results = await self._delete_reminders(direct.arguments or {})
+                tools_used.extend(delete_tools)
+                tool_results.extend(delete_results)
+                self._pending_intents.pop(conversation_id, None)
             elif direct.tool and direct.arguments is not None:
                 if not self.tools.has(direct.tool):
                     answer = f"La capacidad técnica {direct.tool} no está configurada en el Core, señor."
@@ -677,7 +687,10 @@ class JarvisServices:
                         str(succeeded).lower(), str(verification_succeeded).lower(),
                         (time.perf_counter() - tool_started) * 1000,
                     )
-                    answer = render_direct_result(direct.kind, parsed if isinstance(parsed, dict) else {})
+                    answer = render_direct_result(
+                        direct.kind, parsed if isinstance(parsed, dict) else {},
+                        question=message, arguments=direct.arguments,
+                    )
                     if direct.domain == "reminders" and direct.operation in {"list", "search"}:
                         TOOL_LOGGER.info(
                             "turn_id=%s transformation=reminders_raw_to_temporal_items result_count=%s response_template=%s",
@@ -688,6 +701,8 @@ class JarvisServices:
                         self._pending_intents.pop(conversation_id, None)
                         if direct.kind == "reminder_create":
                             self._recent_completed_intents[conversation_id] = (direct, time.monotonic())
+                        if direct.domain == "reminders" and direct.operation in {"list", "search"}:
+                            self._recent_query_intents[conversation_id] = (direct, time.monotonic())
                         if len(self._action_results) > 200:
                             self._action_results.pop(next(iter(self._action_results)))
                 except Exception as exc:
@@ -877,6 +892,89 @@ class JarvisServices:
             conversation_id, message, answer, user_language, turn_id=turn_id,
             tools_used=tools_used, tool_results=tool_results,
         )
+
+    @staticmethod
+    def _contextual_reminder_followup(
+        previous: DirectIntent, message: str, today: date,
+    ) -> DirectIntent | None:
+        if previous.domain != "reminders" or previous.operation not in {"list", "search"}:
+            return None
+        normalized = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode()
+        if not re.search(r"\b(que dias|y manana|mes que viene|la siguiente|cuantas|a que hora)\b", normalized):
+            return None
+        arguments = dict(previous.arguments or {})
+        if "y manana" in normalized:
+            arguments.pop("from", None); arguments.pop("until", None); arguments.pop("temporal_scope", None)
+            arguments["scope"] = "tomorrow"
+        elif "mes que viene" in normalized:
+            first = date(today.year + (today.month == 12), 1 if today.month == 12 else today.month + 1, 1)
+            following = date(first.year + (first.month == 12), 1 if first.month == 12 else first.month + 1, 1)
+            arguments.pop("scope", None); arguments.pop("temporal_scope", None)
+            arguments.update({"from": first.isoformat(), "until": (following - timedelta(days=1)).isoformat()})
+        return DirectIntent(
+            previous.kind, previous.tool, arguments,
+            domain="reminders", operation=previous.operation,
+        )
+
+    async def _delete_reminders(
+        self, arguments: dict[str, Any],
+    ) -> tuple[str, list[str], list[Any]]:
+        queries = [str(item).strip() for item in arguments.get("queries", []) if str(item).strip()]
+        delete_all = bool(arguments.get("delete_all"))
+        scope = str(arguments.get("scope") or "")
+        if not queries and not (delete_all and scope):
+            return "¿Qué recordatorio quiere eliminar, señor?", [], []
+
+        tools_used: list[str] = []
+        tool_results: list[Any] = []
+        resolved: list[dict[str, Any]] = []
+        search_terms = [""] if delete_all and scope else queries
+        for query in search_terms:
+            search_arguments: dict[str, Any] = {"status": "pending", "limit": 100}
+            if scope:
+                search_arguments["scope"] = scope
+            if query:
+                search_arguments["query"] = query
+            raw = await self.tools.execute("bookshell_reminders_query", search_arguments)
+            parsed = json.loads(raw)
+            tools_used.append("bookshell_reminders_query")
+            tool_results.append({"tool": "bookshell_reminders_query", "result": parsed})
+            items = list(parsed.get("items") or [])
+            if delete_all:
+                resolved.extend(items)
+                continue
+            normalized_query = unicodedata.normalize("NFKD", query.casefold()).encode("ascii", "ignore").decode()
+            matching = [
+                item for item in items
+                if normalized_query in unicodedata.normalize(
+                    "NFKD", str(item.get("title") or "").casefold(),
+                ).encode("ascii", "ignore").decode()
+            ]
+            candidates = matching or items
+            if not candidates:
+                return f"No encuentro un recordatorio que coincida con «{query}», señor.", tools_used, tool_results
+            if len(candidates) != 1:
+                options = "; ".join(
+                    f"{item.get('title')} ({item.get('targetDate') or 'sin fecha'})" for item in candidates[:5]
+                )
+                return f"Hay varios candidatos: {options}. ¿Cuál elimino, señor?", tools_used, tool_results
+            resolved.append(candidates[0])
+
+        unique = {str(item.get("id")): item for item in resolved if item.get("id")}
+        if not unique:
+            return "No encuentro recordatorios coincidentes, señor.", tools_used, tool_results
+        for reminder_id in unique:
+            raw = await self.tools.execute("bookshell_reminder_update", {
+                "reminder_id": reminder_id, "action": "cancel", "confirmed": True,
+            })
+            parsed = json.loads(raw)
+            tools_used.append("bookshell_reminder_update")
+            tool_results.append({"tool": "bookshell_reminder_update", "result": parsed})
+            if not self._tool_succeeded(raw, "bookshell_reminder_update") or parsed.get("verified") is not True:
+                return "BookShell no confirmó la eliminación, señor.", tools_used, tool_results
+        count = len(unique)
+        answer = "Recordatorio eliminado, señor." if count == 1 else f"He eliminado {count} recordatorios, señor."
+        return answer, tools_used, tool_results
 
     @staticmethod
     def _tool_succeeded(result: str, tool_name: str = "") -> bool:

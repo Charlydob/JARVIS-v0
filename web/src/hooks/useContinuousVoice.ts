@@ -181,6 +181,7 @@ export function useContinuousVoice({ enabled, paused, conversationState, onListe
     const stopRecording = (submit: boolean, reason: string) => {
       if (!recorder || recorder.state !== 'recording' || !machine.utteranceId) return
       const utteranceId = machine.utteranceId
+      const stateFrom = machine.phase
       if (!machine.requestFinalize(utteranceId)) return
       finalizingUtteranceId = utteranceId
       activeUtteranceId = undefined
@@ -193,13 +194,24 @@ export function useContinuousVoice({ enabled, paused, conversationState, onListe
       recorder.stop()
       activeRecorderSessions.delete(recorderSessionId)
       if (submit) setMicrophoneTracksEnabled(false)
-      log('audio_state_changed', { capture_ignored_reason: submit ? 'processing_started' : reason })
+      log('audio_state_changed', {
+        state_from: stateFrom, state_to: machine.phase, speech_detected: heardVoice,
+        finalize_reason: reason, capture_ignored_reason: submit ? 'processing_started' : reason,
+      })
       recorderStopWatchdog = window.setTimeout(() => {
         if (machine.phase !== 'FINALIZING') return
-        log('recording_finalized', { discard_reason: 'recorder_stop_timeout' })
-        machine.abort()
-        finalizingUtteranceId = undefined
-        callbacks.current.onError('La grabación no se cerró correctamente. Sigo escuchando.')
+        if (submitCurrent && heardVoice && machine.bufferedChunks() > 0) {
+          log('finalizing_watchdog', {
+            state_from: 'FINALIZING', state_to: 'TRANSCRIBING', speech_detected: true,
+            finalize_reason: `${reason}_watchdog`,
+          })
+          void handleStopped()
+        } else {
+          log('recording_finalized', { discard_reason: 'recorder_stop_timeout', speech_detected: heardVoice })
+          machine.abort()
+          finalizingUtteranceId = undefined
+          callbacks.current.onError('La grabación no se cerró correctamente. Sigo escuchando.')
+        }
       }, RECORDER_STOP_TIMEOUT_MS)
     }
 
@@ -286,8 +298,12 @@ export function useContinuousVoice({ enabled, paused, conversationState, onListe
       const stoppedAt = captureStoppedAt || performance.now()
       const durationMs = Math.max(0, stoppedAt - captureStartedAt)
       const speechMs = heardVoice ? Math.max(0, lastVoiceAt - speechStartedAt) : 0
+      const stateFrom = machine.phase
       const finalizedChunks = machine.takeFinalizedChunks(utteranceId)
-      log('audio_state_changed')
+      log('audio_state_changed', {
+        state_from: stateFrom, state_to: machine.phase, speech_detected: heardVoice,
+        finalize_reason: stopReason,
+      })
       finalizingUtteranceId = undefined
       const audio = new Blob(finalizedChunks, { type: recorder?.mimeType || 'audio/webm' })
       const manualFinalize = stopReason === 'manual_finalize'
@@ -313,13 +329,17 @@ export function useContinuousVoice({ enabled, paused, conversationState, onListe
         return
       }
 
-      log('transcription_started')
+      log('transcription_started', { speech_detected: heardVoice, finalize_reason: stopReason })
       try {
         await callbacks.current.onUtterance(
           audio,
           { durationMs, speechMs: effectiveSpeechMs, maxRms, utteranceId, manualFinalize },
           {
-            processing: () => { machine.processing(utteranceId); log('audio_state_changed') },
+            processing: () => {
+              const from = machine.phase
+              machine.processing(utteranceId)
+              log('processing_started', { state_from: from, state_to: machine.phase, speech_detected: heardVoice, finalize_reason: stopReason })
+            },
             speaking: () => { machine.speaking(utteranceId); log('audio_state_changed') },
           },
         )

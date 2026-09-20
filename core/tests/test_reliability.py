@@ -288,3 +288,64 @@ async def test_unrelated_short_transcript_never_reuses_previous_tool_route(tmp_p
 
     assert reads == 1
     assert second["message"] == "No he entendido esa petición."
+
+
+@pytest.mark.asyncio
+async def test_reminder_delete_searches_then_verifies_one_candidate(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+    calls: list[tuple[str, dict]] = []
+
+    async def query(arguments):
+        calls.append(("query", dict(arguments)))
+        return {"items": [{"id": "apple-1", "title": "Llega el paquete de Apple", "targetDate": "2026-09-21"}], "count": 1}
+
+    async def update(arguments):
+        calls.append(("update", dict(arguments)))
+        return {"updated": True, "verified": True, "reminder": {"id": "apple-1", "status": "cancelled"}}
+
+    services.tools.register(Tool("bookshell_reminders_query", "query", {"type": "object"}, query))
+    services.tools.register(Tool("bookshell_reminder_update", "update", {"type": "object"}, update))
+
+    async def collect(_chunk: str) -> None:
+        return None
+
+    result = await services.chat_stream({
+        "message": "Elimina el recordatorio del paquete de Apple",
+        "conversation_id": "delete-reminder", "turn_id": "delete-reminder-turn",
+    }, collect)
+    assert result["message"] == "Recordatorio eliminado, señor."
+    assert calls[0][0] == "query" and calls[0][1]["query"] == "paquete de Apple"
+    assert calls[1] == ("update", {"reminder_id": "apple-1", "action": "cancel", "confirmed": True})
+    assert "delete-reminder" not in services._pending_intents
+
+
+@pytest.mark.asyncio
+async def test_guardia_dates_survive_render_and_contextual_followup_requeries(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+    reads: list[dict] = []
+
+    async def query(arguments):
+        reads.append(dict(arguments))
+        return {"items": [
+            {"id": "g1", "title": "Guardia Laura", "targetDate": "2026-09-24", "status": "pending"},
+            {"id": "g2", "title": "Guardia Laura", "targetDate": "2026-09-27", "status": "pending"},
+        ], "count": 2, "range": "custom"}
+
+    services.tools.register(Tool("bookshell_reminders_query", "query", {"type": "object"}, query))
+
+    async def collect(_chunk: str) -> None:
+        return None
+
+    first = await services.chat_stream({
+        "message": "¿Cuándo tiene Laura guardia?", "conversation_id": "guardias",
+        "turn_id": "guardias-1",
+    }, collect)
+    second = await services.chat_stream({
+        "message": "¿Pero qué días?", "conversation_id": "guardias",
+        "turn_id": "guardias-2",
+    }, collect)
+
+    assert "24 y el 27 de septiembre" in first["message"]
+    assert "24 y el 27 de septiembre" in second["message"]
+    assert len(reads) == 2
+    assert reads[1]["event_type"] == "guardia" and reads[1]["person"] == "laura"

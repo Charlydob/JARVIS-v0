@@ -50,6 +50,39 @@ def test_required_real_phrases_route_with_exact_write_and_filters() -> None:
     }
 
 
+@pytest.mark.parametrize("message,page", [
+    ("anota que voy en la página 230", 230),
+    ("apunta que voy por la 229", 229),
+    ("actualiza la página a 229", 229),
+    ("pon que voy por la 229", 229),
+    ("voy por la 229, anótalo", 229),
+])
+def test_natural_book_updates_win_over_reads(message: str, page: int) -> None:
+    intent = route_direct_intent(message, date(2026, 9, 20))
+    assert (intent.tool, intent.operation, intent.arguments) == (
+        "bookshell_update_progress", "update", {"page": page},
+    )
+    read = route_direct_intent("¿En qué página voy?", date(2026, 9, 20))
+    assert (read.tool, read.operation) == ("bookshell_books_query", None)
+
+
+def test_reminder_without_time_waits_and_delete_routes_to_search() -> None:
+    now = datetime(2026, 9, 20, 12, 0, tzinfo=ZoneInfo("Europe/Zurich"))
+    create = route_direct_intent("Recuérdame mañana comprar leche", now.date(), now)
+    assert create.clarification == "¿A qué hora, señor?"
+    assert create.missing_fields == ("time",)
+    assert "target_time" not in create.arguments
+
+    delete = route_direct_intent("Elimina el recordatorio del paquete de Apple", now.date(), now)
+    assert (delete.kind, delete.operation) == ("reminder_delete", "delete")
+    assert delete.arguments == {"queries": ["paquete de Apple"]}
+    multiple = route_direct_intent(
+        "Elimina el recordatorio del paquete de Apple y el recordatorio 'está ese recordatorio creado o no'",
+        now.date(), now,
+    )
+    assert multiple.arguments == {"queries": ["paquete de Apple", "está ese recordatorio creado o no"]}
+
+
 def test_book_write_keeps_title_and_gym_write_wins_over_read() -> None:
     today = date(2026, 9, 19)
     book = route_direct_intent("Actualiza la página de Musashi. Voy en la 222.", today)

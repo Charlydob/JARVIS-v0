@@ -25,8 +25,8 @@ def _next_weekday(today: date, weekday: int) -> str:
     return (today + timedelta(days=days or 7)).isoformat()
 
 
-CREATE_PATTERN = r"(?:recu[eé]rdame|a[nñ]ad(?:e|ir|as|a|eme)?|agreg\w*|cre\w*|apunt\w*|anot\w*|ponme\s+un\s+recordatorio|quiero\s+recordar)"
-CREATE_PATTERN_NORMALIZED = r"(?:recuerdame|anad(?:e|ir|as|a|eme)?|agreg\w*|cre\w*|apunt\w*|anot\w*|ponme\s+un\s+recordatorio|quiero\s+recordar)"
+CREATE_PATTERN = r"(?:recu[eé]rdame|a[nñ]ad(?:e|ir|as|a|eme)?|agreg\w*|cr[eé](?:a|ar|ame|e|ad|en)?|apunt\w*|anot\w*|ponme\s+un\s+recordatorio|quiero\s+recordar)"
+CREATE_PATTERN_NORMALIZED = r"(?:recuerdame|anad(?:e|ir|as|a|eme)?|agreg\w*|cre(?:a|ar|ame|e|ad|en)?|apunt\w*|anot\w*|ponme\s+un\s+recordatorio|quiero\s+recordar)"
 WEEKDAYS = {"lunes": 0, "martes": 1, "miercoles": 2, "jueves": 3, "viernes": 4, "sabado": 5, "domingo": 6}
 HOUR_WORDS = {
     "una": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6,
@@ -166,10 +166,33 @@ def _reminder_query(text: str) -> str:
     return re.sub(r"\s+", " ", query).strip(" ¿?¡!,.-")
 
 
+def _reminder_delete_queries(message: str) -> list[str]:
+    tail = re.sub(r"(?is)^.*?\b(?:elimina|borra|cancela)\b", "", message, count=1).strip()
+    parts = re.split(
+        r"(?i)\s+y\s+(?=(?:(?:el|la)\s+)?(?:recordatori[oa]\b|['\"]))",
+        tail,
+    )
+    queries = []
+    for part in parts:
+        cleaned = re.sub(
+            r"(?i)^\s*(?:(?:el|la|los|las)\s+)?recordatori[oa]s?\s*(?:de(?:l)?\s+)?",
+            "", part,
+        ).strip(" \t\r\n'\"¿?¡!,.-")
+        if cleaned:
+            queries.append(cleaned)
+    return queries
+
+
 def route_direct_intent(message: str, today: date, now: datetime | None = None) -> DirectIntent | None:
     text = normalize(message)
-    page = re.search(r"\bpagina\s+(\d{1,5})\b|\b(?:voy\s+(?:por|en)\s+la|hasta\s+la)\s+(\d{1,5})\b", text)
-    write_page = page and re.search(r"\b(apunta|anota|actualiza|pon|voy por|he llegado|marca)\b", text)
+    page = re.search(
+        r"\bpagina(?:\s+(?:a|en))?\s+(\d{1,5})\b|\b(?:voy\s+(?:por|en|a)\s+la|hasta\s+la)\s+(\d{1,5})\b",
+        text,
+    )
+    write_page = page and re.search(
+        r"\b(apunt\w*|anot\w*|a\s+nota|actualiz\w*|pon\w*|voy\s+por|he\s+llegado|marc\w*|contar\s+que\s+voy)\b",
+        text,
+    )
     if write_page:
         arguments: dict[str, Any] = {"page": int(page.group(1) or page.group(2))}
         title_match = re.search(r"\bpagina\s+de\s+([a-z0-9][a-z0-9 ]*?)(?:\s*[.,;]|\s+voy\b|$)", text)
@@ -206,6 +229,16 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
     reminder_topic = re.search(r"\b(recordatori[oa]s?|recuerdame|clase|cita|dentista|guardia)\b", text)
     creation = re.search(rf"\b{CREATE_PATTERN_NORMALIZED}\b", text)
     reminder_context = reminder_topic or re.search(r"\b(hoy|manana|lunes|martes|miercoles|jueves|viernes|sabado|domingo)\b", text)
+
+    if reminder_topic and re.search(r"\b(cancela|elimina|borra)\b", text):
+        scope = _temporal_scope(text)
+        arguments: dict[str, Any] = {"queries": _reminder_delete_queries(message)}
+        if scope:
+            arguments.update({"scope": scope, "delete_all": bool(re.search(r"\brecordatorios\b", text))})
+        return DirectIntent(
+            "reminder_delete", arguments=arguments,
+            domain="reminders", operation="delete",
+        )
 
     # Explicit write intent must win before any read pattern such as "hoy que tengo".
     if creation and reminder_context:
@@ -317,13 +350,45 @@ def is_pending_field_response(pending: DirectIntent, message: str) -> bool:
     return False
 
 
-def render_direct_result(kind: str, result: dict[str, Any]) -> str:
+MONTH_NAMES = (
+    "", "enero", "febrero", "marzo", "abril", "mayo", "junio",
+    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+)
+
+
+def _render_reminder_dates(items: list[dict[str, Any]]) -> str:
+    dates = []
+    for item in items:
+        try:
+            parsed = date.fromisoformat(str(item.get("targetDate") or ""))
+        except ValueError:
+            continue
+        if parsed not in dates:
+            dates.append(parsed)
+    dates.sort()
+    if not dates:
+        return ""
+    if len(dates) > 1 and len({(value.year, value.month) for value in dates}) == 1:
+        days = " y ".join(f"el {value.day}" for value in dates)
+        return f"{days} de {MONTH_NAMES[dates[0].month]}"
+    return " y ".join(f"el {value.day} de {MONTH_NAMES[value.month]}" for value in dates)
+
+
+def render_direct_result(
+    kind: str, result: dict[str, Any], *, question: str = "",
+    arguments: dict[str, Any] | None = None,
+) -> str:
     if kind in {"book_current", "book_progress"}:
         book = result.get("book") or {}
         if not result.get("found") or not book:
             return str(result.get("message") or "No encuentro el libro actual, señor.")
         title, page, pages = book.get("title"), book.get("currentPage"), book.get("pages")
-        return f"Está leyendo {title} y va por la página {page} de {pages}, señor."
+        normalized_question = normalize(question)
+        if "ahora" in normalized_question:
+            return f"Ahora va por la {page} de {pages}, señor."
+        if "musashi" in normalized_question or "libro" in normalized_question:
+            return f"Está leyendo {title} y va por la página {page} de {pages}, señor."
+        return f"Va por la página {page} de {pages}, señor."
     if kind == "book_update":
         return "Anotado, señor." if result.get("updated") and result.get("verified") else str(result.get("message") or "BookShell no confirmó la escritura, señor.")
     if kind == "gym_last":
@@ -354,6 +419,7 @@ def render_direct_result(kind: str, result: dict[str, Any]) -> str:
         return f"El último movimiento fue {amount} {currency} en {category}, el {movement_date}, señor."
     if kind in {"reminders_today", "reminder_list", "reminder_search"}:
         items = list(result.get("items") or [])
+        arguments = arguments or {}
         scope = str(result.get("range") or "today")
         label = {
             "today": "hoy", "tomorrow": "mañana", "this_week": "esta semana",
@@ -361,13 +427,22 @@ def render_direct_result(kind: str, result: dict[str, Any]) -> str:
         }.get(scope, "ese periodo")
         if not items:
             return f"No tiene recordatorios para {label}, señor."
+        if arguments.get("event_type") == "guardia":
+            rendered_dates = _render_reminder_dates(items)
+            subject = str(arguments.get("person") or "Laura").capitalize()
+            if rendered_dates:
+                count = "una guardia" if len(items) == 1 else f"{len(items)} guardias"
+                return f"{subject} tiene {count} próximas: {rendered_dates}, señor."
         descriptions = []
         for item in items[:5]:
             description = str(item.get("title") or "Recordatorio")
+            try:
+                target_date = date.fromisoformat(str(item.get("targetDate") or ""))
+                description += f" el {target_date.day} de {MONTH_NAMES[target_date.month]}"
+            except ValueError:
+                pass
             if item.get("targetTime"):
                 description += f" a las {item['targetTime']}"
-            if item.get("temporalState"):
-                description += f" ({item['temporalState']})"
             descriptions.append(description)
         return "; ".join(descriptions) + ", señor."
     if kind == "reminder_create":

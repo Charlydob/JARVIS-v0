@@ -39,7 +39,9 @@ export class VoiceCaptureMachine {
   }
 
   processing(utteranceId: string) {
-    if (utteranceId === this.utteranceId && this.phase === 'TRANSCRIBING') this.phase = 'PROCESSING'
+    if (utteranceId !== this.utteranceId || this.phase !== 'TRANSCRIBING') return false
+    this.phase = 'PROCESSING'
+    return true
   }
 
   speaking(utteranceId: string) {
