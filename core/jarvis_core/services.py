@@ -352,7 +352,9 @@ class JarvisServices:
         self.tts = TextToSpeechService(settings)
         self.tools = ToolRegistry()
         self.tools.load_modules(settings.tool_modules)
-        self.feedback = FeedbackLearning(self.storage, self.ollama.select_feedback)
+        # Feedback retrieval is lexical and domain-scoped in the hot path. An
+        # Ollama selection round added 8-11 seconds even to greetings and CRUD.
+        self.feedback = FeedbackLearning(self.storage)
         self.languages = SessionLanguagePolicy()
         self._location_cache: dict[tuple[float, float], str] = {}
         self._geocode_lock = asyncio.Lock()
@@ -600,12 +602,16 @@ class JarvisServices:
                     domain="notes", operation="update",
                 )
             elif note and add_item and "checklist" in [str(tag).casefold() for tag in note.get("tags") or []]:
+                checklist_items = [
+                    item.strip(" .") for item in re.split(r"\s*(?:,|;|\by\b)\s*", add_item.group(1), flags=re.I)
+                    if item.strip(" .")
+                ]
                 direct = DirectIntent(
                     "checklist_mark", "bookshell_notes_write",
-                    {"action": "update", "note_id": note.get("id"), "append_content": f"- [ ] {add_item.group(1).strip(' .')}"},
+                    {"action": "update", "note_id": note.get("id"), "append_content": "\n".join(f"- [ ] {item}" for item in checklist_items)},
                     domain="notes", operation="update",
                 )
-            elif note and re.search(r"\b(?:y\s+)?que\s+(?:falta|queda)\b", normalized_message):
+            elif note and re.search(r"\b(?:y\s+)?que\s+(?:falta|queda)\b|\btareas?\s+de\s+esa\s+nota\b", normalized_message):
                 direct = DirectIntent(
                     "checklist_pending", "bookshell_notes_query",
                     {"query": note.get("title") or "", "pending_only": True, "limit": 10},
@@ -665,6 +671,20 @@ class JarvisServices:
         )
         tools_used: list[str] = []
         tool_results: list[Any] = []
+        if self._asks_internet_capability(message):
+            answer = self._internet_capability_answer()
+            await on_chunk(answer)
+            return self._store_chat_result(
+                conversation_id, message, answer, user_language, turn_id=turn_id,
+                tools_used=tools_used, tool_results=tool_results,
+            )
+        if self._requests_open_unknown_url(message):
+            answer = "No tengo todavía una URL concreta porque no tengo búsqueda web configurada, señor."
+            await on_chunk(answer)
+            return self._store_chat_result(
+                conversation_id, message, answer, user_language, turn_id=turn_id,
+                tools_used=tools_used, tool_results=tool_results,
+            )
         if self._requests_web_search(message) and not self.tools.has("web_search"):
             answer = "No tengo búsqueda web configurada actualmente, señor."
             await on_chunk(answer)
@@ -710,6 +730,17 @@ class JarvisServices:
                 answer, delete_tools, delete_results = await self._delete_reminders(direct.arguments or {})
                 tools_used.extend(delete_tools)
                 tool_results.extend(delete_results)
+                self._pending_intents.pop(conversation_id, None)
+            elif direct.kind == "note_folder_create":
+                try:
+                    answer, folder_tools, folder_results = await self._create_notes_folder(
+                        direct.arguments or {}, turn_id,
+                    )
+                    tools_used.extend(folder_tools)
+                    tool_results.extend(folder_results)
+                except Exception as exc:
+                    TOOL_LOGGER.exception("turn_id=%s event=tool_error tool=bookshell_notes_folder_create", turn_id)
+                    answer = f"No se pudo crear la carpeta: {str(exc)[:240]}, señor."
                 self._pending_intents.pop(conversation_id, None)
             elif direct.tool and direct.arguments is not None:
                 if not self.tools.has(direct.tool):
@@ -812,7 +843,7 @@ class JarvisServices:
 
         async def timed_feedback() -> str | None:
             started = time.perf_counter()
-            result = await self.feedback.context_for(message)
+            result = None if self._skip_feedback(message) else await self.feedback.context_for(message)
             PERFORMANCE_LOGGER.info("stage=feedback_retrieval duration_ms=%.1f", (time.perf_counter() - started) * 1000)
             return result
 
@@ -882,6 +913,7 @@ class JarvisServices:
                 conversation.append(decision)
                 authoritative_results: list[str] = []
                 failure_messages: list[str] = []
+                simple_answers: list[str] = []
                 for call in tool_calls:
                     tool_call_id = str(call.get("id") or uuid4())
                     function = dict(call.get("function") or {})
@@ -906,6 +938,9 @@ class JarvisServices:
                         TOOL_LOGGER.info("turn_id=%s tool_call_id=%s event=tool_executed tool=%s duration_ms=%.1f", turn_id, tool_call_id, name, (time.perf_counter() - tool_started) * 1000)
                         if self._tool_succeeded(result, name):
                             TOOL_LOGGER.info("turn_id=%s tool_call_id=%s event=tool_success tool=%s", turn_id, tool_call_id, name)
+                            simple_answer = self._render_simple_tool_result(name, stored_result)
+                            if simple_answer:
+                                simple_answers.append(simple_answer)
                         else:
                             TOOL_LOGGER.warning("turn_id=%s tool_call_id=%s event=tool_error tool=%s result=%s", turn_id, tool_call_id, name, result)
                             failure_messages.append(self._tool_failure_message(result))
@@ -924,6 +959,14 @@ class JarvisServices:
                         conversation_id, message, answer, user_language, turn_id=turn_id,
                         tools_used=tools_used, tool_results=tool_results,
                     )
+                if simple_answers and len(simple_answers) == len(tool_calls):
+                    answer = " ".join(simple_answers)
+                    await on_chunk(answer)
+                    PERFORMANCE_LOGGER.info("stage=chat_total duration_ms=%.1f path=direct_tool_result", (time.perf_counter() - total_started) * 1000)
+                    return self._store_chat_result(
+                        conversation_id, message, answer, user_language, turn_id=turn_id,
+                        tools_used=tools_used, tool_results=tool_results,
+                    )
                 conversation.append({
                     "role": "system",
                     "content": (
@@ -937,8 +980,8 @@ class JarvisServices:
                 })
             else:
                 answer = self._safe_user_answer(str(decision.get("content", "")).strip())
-                if self._claims_success(answer):
-                    answer = "No he ejecutado esa acción. Necesito los datos requeridos para hacerlo."
+                if self._requests_external_action(message):
+                    answer = "No he ejecutado esa acción porque no se seleccionó una herramienta adecuada, señor."
                 if answer:
                     await on_chunk(answer)
                 PERFORMANCE_LOGGER.info("stage=chat_total duration_ms=%.1f path=tool_no_call", (time.perf_counter() - total_started) * 1000)
@@ -951,6 +994,7 @@ class JarvisServices:
         ollama_started = time.perf_counter()
         ollama_stage = "second_llm" if definitions else "ollama"
         first_token = True
+        external_action_without_tool = self._requests_external_action(message) and not tools_used
         streaming_safe = False
         held_chunks: list[str] = []
         async for chunk in self.ollama.chat_stream(conversation, context):
@@ -965,13 +1009,15 @@ class JarvisServices:
                 prefix = "".join(held_chunks).lstrip()
                 # Hold JSON/code-fenced starts until the complete response can
                 # be classified; ordinary prose keeps true chunk streaming.
-                if prefix and not prefix.startswith(("{", "[", "```", "<tool", "tool_call")):
+                if not external_action_without_tool and prefix and not prefix.startswith(("{", "[", "```", "<tool", "tool_call")):
                     streaming_safe = True
                     for held in held_chunks:
                         await on_chunk(held)
                     held_chunks.clear()
         PERFORMANCE_LOGGER.info("turn_id=%s stage=%s_total duration_ms=%.1f", turn_id, ollama_stage, (time.perf_counter() - ollama_started) * 1000)
         answer = self._safe_user_answer("".join(chunks).strip())
+        if external_action_without_tool:
+            answer = "No he ejecutado esa acción porque no hay una herramienta adecuada seleccionada, señor."
         if answer and not streaming_safe:
             await on_chunk(answer)
         PERFORMANCE_LOGGER.info("turn_id=%s stage=total duration_ms=%.1f path=%s", turn_id, (time.perf_counter() - total_started) * 1000, "tool" if definitions else "fast")
@@ -1073,6 +1119,60 @@ class JarvisServices:
         answer = "Recordatorio eliminado, señor." if count == 1 else f"He eliminado {count} recordatorios, señor."
         return answer, tools_used, tool_results
 
+    async def _create_notes_folder(
+        self, arguments: dict[str, Any], turn_id: str,
+    ) -> tuple[str, list[str], list[Any]]:
+        query_tool = "bookshell_notes_folder_query"
+        create_tool = "bookshell_notes_folder_create"
+        name = str(arguments.get("name") or "").strip()
+        if not name:
+            return "¿Qué nombre debe tener la carpeta, señor?", [], []
+        missing = [tool for tool in (query_tool, create_tool) if not self.tools.has(tool)]
+        if missing:
+            return f"La capacidad técnica {missing[0]} no está configurada en el Core, señor.", [], []
+
+        tools_used: list[str] = []
+        tool_results: list[Any] = []
+        query_id = str(uuid4())
+        query_arguments = {"query": name, "limit": 10}
+        TOOL_LOGGER.info(
+            "turn_id=%s tool_call_id=%s event=tool_requested tool=%s arguments=%s",
+            turn_id, query_id, query_tool, json.dumps(query_arguments, ensure_ascii=False),
+        )
+        raw_query = await self.tools.execute(query_tool, query_arguments)
+        queried = json.loads(raw_query)
+        tools_used.append(query_tool)
+        tool_results.append({"tool": query_tool, "result": queried})
+        exact = next((
+            item for item in queried.get("items") or []
+            if self._reminder_match_text(item.get("name")) == self._reminder_match_text(name)
+        ), None)
+        TOOL_LOGGER.info(
+            "turn_id=%s tool_call_id=%s event=tool_success tool=%s result_count=%s",
+            turn_id, query_id, query_tool, queried.get("count", 0),
+        )
+        if exact:
+            result = {"created": False, "existing": True, "verified": True, "folder": exact}
+            return render_direct_result("note_folder_create", result), tools_used, tool_results
+
+        create_id = str(uuid4())
+        create_arguments = {"name": name}
+        TOOL_LOGGER.info(
+            "turn_id=%s tool_call_id=%s event=tool_requested tool=%s arguments=%s",
+            turn_id, create_id, create_tool, json.dumps(create_arguments, ensure_ascii=False),
+        )
+        raw_create = await self.tools.execute(create_tool, create_arguments)
+        created = json.loads(raw_create)
+        tools_used.append(create_tool)
+        tool_results.append({"tool": create_tool, "result": created})
+        succeeded = self._tool_succeeded(raw_create, create_tool)
+        TOOL_LOGGER.info(
+            "turn_id=%s tool_call_id=%s event=%s tool=%s verification_success=%s",
+            turn_id, create_id, "tool_success" if succeeded else "tool_error", create_tool,
+            str(created.get("verified") is True).lower(),
+        )
+        return render_direct_result("note_folder_create", created), tools_used, tool_results
+
     @staticmethod
     def _reminder_match_text(value: Any) -> str:
         normalized = unicodedata.normalize("NFKD", str(value or "").casefold()).encode("ascii", "ignore").decode()
@@ -1097,7 +1197,7 @@ class JarvisServices:
             successful = True
         if tool_name in {
             "bookshell_update_progress", "bookshell_create_reminder", "bookshell_gym_write",
-            "bookshell_create_book", "bookshell_notes_write", "bookshell_notes_folder_write",
+            "bookshell_create_book", "bookshell_notes_write", "bookshell_notes_folder_create",
             "bookshell_finance_create",
         }:
             return successful and payload.get("verified") is True
@@ -1128,15 +1228,87 @@ class JarvisServices:
 
     @staticmethod
     def _claims_success(answer: str) -> bool:
-        return bool(re.search(r"\b(cread[oa]|actualizad[oa]|guardad[oa]|eliminad[oa]|completad[oa]|created|updated|saved|deleted)\b", answer.casefold()))
+        return bool(re.search(
+            r"\b(cread[oa]|actualizad[oa]|guardad[oa]|a[nñ]adid[oa]|agregad[oa]|eliminad[oa]|"
+            r"completad[oa]|abiert[oa]|hecho|created|updated|saved|added|deleted|completed|opened)\b",
+            answer.casefold(),
+        ))
+
+    @staticmethod
+    def _requests_external_action(message: str) -> bool:
+        normalized = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode().strip()
+        return bool(re.search(
+            r"^(?:jarvis[,.]?\s*)?(?:(?:quiero|necesito|me\s+gustaria)\s+que\s+|(?:puedes|podrias)\s+)?"
+            r"(?:(?:lo|la|me)\s+)?(?:crea|cree|crear|creame|guarda|guardar|guardame|anade|anadir|"
+            r"agrega|agregar|actualiza|actualizar|marca|marcar|elimina|eliminar|borra|borrar|abre|"
+            r"abrir|abreme|abrirme|registra|registrar|anota|anotar)\b",
+            normalized,
+        ))
+
+    @staticmethod
+    def _asks_internet_capability(message: str) -> bool:
+        normalized = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode()
+        return bool(re.search(r"\b(?:tienes|tiene)\s+(?:acceso\s+a\s+)?internet\b", normalized))
+
+    def _internet_capability_answer(self) -> str:
+        has_search = self.tools.has("web_search")
+        has_open = self.tools.has("pc_open_url")
+        if has_search:
+            return "Tengo búsqueda web general configurada, señor."
+        if has_open:
+            return "Tengo conexión para algunas herramientas y puedo abrir URLs, pero no tengo búsqueda web general configurada todavía, señor."
+        return "Tengo conexión para algunas herramientas, pero no tengo búsqueda web general ni apertura de URLs configuradas, señor."
+
+    def _requests_open_unknown_url(self, message: str) -> bool:
+        if self.tools.has("web_search") or re.search(r"https?://[^\s)]+", message):
+            return False
+        normalized = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode()
+        return bool(
+            re.search(r"\b(?:abre|abrir|abreme|muestra|mostrar)\b", normalized)
+            and re.search(r"\b(?:ordenador|navegador|pc|computadora)\b", normalized)
+            and re.search(r"\b(?:wikipedia|pagina|web|sitio)\b", normalized)
+        )
 
     @staticmethod
     def _requests_web_search(message: str) -> bool:
         normalized = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode()
         return bool(re.search(
-            r"\b(?:tienes|tiene)\s+internet\b|\b(?:busca|buscalo|buscar|consulta|consultalo)\b.*\b(?:internet|web)\b|\bweb\s+search\b",
+            r"\bbusc\w*\b.*\b(?:internet|web|wikipedia|pagina)\b|"
+            r"\bconsult\w*\b.*\b(?:internet|web|wikipedia|pagina)\b|\bweb\s+search\b",
             normalized,
         ))
+
+    @classmethod
+    def _skip_feedback(cls, message: str) -> bool:
+        normalized = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode().strip(" .,!?")
+        return cls._requests_external_action(message) or normalized in {
+            "jarvis", "hola", "buenos dias", "buenas tardes", "buenas noches", "hey jarvis",
+        }
+
+    @staticmethod
+    def _render_simple_tool_result(name: str, payload: Any) -> str | None:
+        if not isinstance(payload, dict) or payload.get("verified") is not True:
+            return None
+        if name == "bookshell_notes_write":
+            note = payload.get("note") or {}
+            title = str(note.get("title") or "la nota")
+            verb = "creado" if payload.get("created") else "actualizado"
+            return f"La nota «{title}» se ha {verb}, señor."
+        if name == "bookshell_notes_folder_create":
+            folder = payload.get("folder") or {}
+            return f"La carpeta «{folder.get('name') or 'solicitada'}» está disponible en BookShell, señor."
+        if name == "bookshell_create_reminder" and payload.get("created"):
+            return "Recordatorio creado y verificado, señor."
+        if name == "bookshell_reminder_update" and (payload.get("updated") or payload.get("deleted") or payload.get("completed")):
+            return "Recordatorio actualizado y verificado, señor."
+        if name == "bookshell_create_book" and (payload.get("created") or payload.get("updated") or payload.get("alreadyCurrent")):
+            book = payload.get("book") or {}
+            return f"{book.get('title') or 'El libro'} está marcado como lectura actual, señor."
+        if name == "bookshell_update_progress" and payload.get("updated"):
+            return "Progreso de lectura actualizado y verificado, señor."
+        if name == "pc_open_url" and payload.get("opened"):
+            return "URL abierta en el navegador, señor."
+        return None
 
     @staticmethod
     def _safe_user_answer(answer: str) -> str:

@@ -28,6 +28,10 @@ def _next_weekday(today: date, weekday: int) -> str:
 CREATE_PATTERN = r"(?:recu[eé]rdame|a[nñ]ad(?:e|ir|as|a|eme)?|agreg\w*|cr[eé](?:a|ar|ame|e|ad|en)?|apunt\w*|anot\w*|ponme\s+un\s+recordatorio|quiero\s+recordar)"
 CREATE_PATTERN_NORMALIZED = r"(?:recuerdame|anad(?:e|ir|as|a|eme)?|agreg\w*|cre(?:a|ar|ame|e|ad|en)?|apunt\w*|anot\w*|ponme\s+un\s+recordatorio|quiero\s+recordar)"
 WEEKDAYS = {"lunes": 0, "martes": 1, "miercoles": 2, "jueves": 3, "viernes": 4, "sabado": 5, "domingo": 6}
+MONTHS = {
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+    "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12,
+}
 HOUR_WORDS = {
     "una": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6,
     "siete": 7, "ocho": 8, "nueve": 9, "diez": 10, "once": 11, "doce": 12,
@@ -124,6 +128,20 @@ def _extract_date(text: str, today: date) -> str | None:
     explicit = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", text)
     if explicit:
         return explicit.group(1)
+    natural = re.search(
+        r"\b(?:el\s+)?([0-3]?\d)\s+de\s+(" + "|".join(MONTHS) + r")(?:\s+de\s+(20\d{2}))?\b",
+        text,
+    )
+    if natural:
+        day, month = int(natural.group(1)), MONTHS[natural.group(2)]
+        year = int(natural.group(3)) if natural.group(3) else today.year
+        try:
+            resolved = date(year, month, day)
+            if not natural.group(3) and resolved < today:
+                resolved = date(year + 1, month, day)
+            return resolved.isoformat()
+        except ValueError:
+            return None
     if re.search(r"\bmanana\b", text) and not re.search(r"\b(?:de|por)\s+la\s+manana\b", text):
         return (today + timedelta(days=1)).isoformat()
     if re.search(r"\bhoy\b", text):
@@ -145,6 +163,9 @@ def _temporal_scope(text: str) -> str | None:
 
 
 def _reminder_title(message: str) -> str:
+    named = re.search(r"(?is)\b(?:que\s+se\s+llame|llamad[oa]|titulad[oa])\s+(.+)$", message)
+    if named:
+        return named.group(1).strip(" ¿?¡!,.-") or "Recordatorio"
     title = re.sub(rf"(?is)^.*?\b{CREATE_PATTERN}\b", "", message, count=1).strip()
     title = re.sub(r"(?i)^\s*(?:como\s+)?(?:un\s+)?recordatorio(?:\s+para)?\s*", "", title)
     title = re.sub(r"(?i)\b(?:hoy|mañana|este\s+|el\s+)?(?:lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b", " ", title)
@@ -186,19 +207,32 @@ def _reminder_delete_queries(message: str) -> list[str]:
 
 def route_direct_intent(message: str, today: date, now: datetime | None = None) -> DirectIntent | None:
     text = normalize(message)
+    explicit_url = re.search(r"https?://[^\s)]+", message)
+    if explicit_url and re.search(r"\b(?:abre|abrir|abreme|muestra|mostrar)\b", text) and re.search(
+        r"\b(?:ordenador|navegador|pc|computadora)\b", text,
+    ):
+        return DirectIntent(
+            "pc_open_url", "pc_open_url", {"url": explicit_url.group(0).rstrip(".,;"), "title": "URL"},
+            domain="pc", operation="open",
+        )
+    if re.search(r"\bcarpeta\s+y\s+notas?\b", text):
+        return DirectIntent(
+            "note_folder_create", clarification="¿Quiere crear una carpeta o una nota, señor?",
+            domain="notes", operation="create",
+        )
     # Explicit Notes nouns take precedence over generic verbs such as "crea" or
     # "anota", which are also valid reminder verbs.
     folder_create = re.search(
-        r"(?is)\bcrea\s+(?:una\s+)?carpeta\s+(?:en|de)\s+notas(?:\s+(?:llamada|titulada))?\s+(.+)$",
+        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?(?:sub)?carpeta\s+(?:en|de)\s+notas(?:\s+(?:llamada|titulada))?\s+(.+)$",
         message,
     )
     if folder_create:
-        return DirectIntent("note_folder_create", "bookshell_notes_folder_write", {
-            "action": "create", "name": folder_create.group(1).strip(" ."),
+        return DirectIntent("note_folder_create", "bookshell_notes_folder_create", {
+            "name": folder_create.group(1).strip(" ."),
         }, domain="notes", operation="create")
 
     checklist_create = re.search(
-        r"(?is)\bcrea\s+(?:un(?:a)?\s+)?(?:nota\s+(?:tipo\s+)?)?checklist"
+        r"(?is)\b(?:crea|cree|crear)\s+(?:un(?:a)?\s+)?(?:nota\s+(?:tipo\s+)?)?(?:checklist|lista\s+de\s+tareas)"
         r"(?:\s+(?:llamad[oa]|titulad[oa]))?\s+(.+?)"
         r"(?:\s+(?:con\s+)?(?:los\s+)?(?:puntos|elementos|tareas)\s*[:：]\s*(.+))?$",
         message,
@@ -215,7 +249,7 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         }, domain="notes", operation="create")
 
     note_create_with_content = re.search(
-        r"(?is)\bcrea\s+(?:una\s+)?nota(?:\s+(?:llamada|titulada))?\s+(.+?)"
+        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?nota(?:\s+(?:llamada|titulada))?\s+(.+?)"
         r"\s+(?:con\s+)?(?:el\s+)?contenido\s*[:：]?\s*(.+)$",
         message,
     )
@@ -226,18 +260,33 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         }, domain="notes", operation="create")
 
     note_create = re.search(
-        r"(?is)\bcrea\s+(?:una\s+)?nota(?:\s+(?:llamada|titulada))?\s+(.+)$", message,
+        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?nota(?:\s+(?:llamada|titulada))?\s+(.+)$", message,
     )
     if note_create:
         return DirectIntent("note_create", "bookshell_notes_write", {
             "action": "create", "title": note_create.group(1).strip(" ."), "content": "",
         }, domain="notes", operation="create")
 
-    reading = re.search(r"(?is)\bestoy\s+leyendo\s+(.+?)\s+de\s+([^.,]+?)(?=\s*[.,]|$)", message)
+    reading = re.search(
+        r"(?is)\b(?:estoy\s+leyendo|empiezo\s+a\s+leer|marca\s+como\s+leyendo)\s+(.+?)\s+de\s+([^.,]+?)(?=\s*[.,]|$)",
+        message,
+    )
     if reading:
         return DirectIntent("book_reading", "bookshell_create_book", {
             "title": reading.group(1).strip(), "author": reading.group(2).strip(),
             "current_page": 0, "status": "reading",
+        }, domain="books", operation="update")
+
+    book_add = re.search(
+        r"(?is)\b(?:a[nñ]ad\w*|agreg\w*|anot\w*|registr\w*)\b.*?\blibro\s+"
+        r"(.+?)\s+de\s+([^,.;]+?)(?=\s*[,.;]|\s+pagina\b|$)",
+        message,
+    )
+    if book_add:
+        page_match = re.search(r"\bp[aá]gina\s+(\d{1,5})\b", message, flags=re.I)
+        return DirectIntent("book_reading", "bookshell_create_book", {
+            "title": book_add.group(1).strip(), "author": book_add.group(2).strip(),
+            "current_page": int(page_match.group(1)) if page_match else 0, "status": "reading",
         }, domain="books", operation="update")
 
     purchased = re.search(
@@ -276,6 +325,7 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         return DirectIntent("checklist_pending", "bookshell_notes_query", {
             "query": pending_checklist.group(1).strip(" .?"), "pending_only": True, "limit": 10,
         }, domain="notes", operation="read")
+    web_page_context = bool(re.search(r"\b(?:wikipedia|pagina\s+web|sitio\s+web|internet|url|web)\b", text))
     page = re.search(
         r"\bpagina(?:\s+(?:a|en))?\s+(\d{1,5})\b|\b(?:voy\s+(?:por|en|a)\s+la|hasta\s+la)\s+(\d{1,5})\b",
         text,
@@ -284,13 +334,18 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         r"\b(apunt\w*|anot\w*|a\s+nota|actualiz\w*|pon\w*|voy\s+por|he\s+llegado|marc\w*|contar\s+que\s+voy)\b",
         text,
     )
-    if write_page:
+    if write_page and not web_page_context:
         arguments: dict[str, Any] = {"page": int(page.group(1) or page.group(2))}
         title_match = re.search(r"\bpagina\s+de\s+([a-z0-9][a-z0-9 ]*?)(?:\s*[.,;]|\s+voy\b|$)", text)
         if title_match:
             arguments["title"] = title_match.group(1).strip()
         return DirectIntent("book_update", "bookshell_update_progress", arguments, domain="books", operation="update")
-    if re.search(r"\b(que|cual|por)\b.*\bpagina\b|\bpagina\b.*\b(voy|actual)\b", text):
+    read_page = re.search(
+        r"\b(?:en|por|que|cual)\s+(?:la\s+)?pagina\b.*\b(?:voy|libro|lectura)\b|"
+        r"\bpagina\s+(?:del|de un|de mi)\s+libro\b|\bvoy\s+por\s+la\s+pagina\b",
+        text,
+    )
+    if read_page and not web_page_context:
         return DirectIntent("book_progress", "bookshell_books_query", {"mode": "progress", "limit": 1})
     if re.search(r"\b(que|cual)\b.*\blibro\b.*\b(leo|leyendo|actual)\b|\blibro actual\b", text):
         return DirectIntent("book_current", "bookshell_books_query", {"mode": "current", "limit": 1})

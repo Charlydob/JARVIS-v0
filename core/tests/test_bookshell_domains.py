@@ -189,6 +189,24 @@ def test_blank_checklist_can_add_mark_and_query_persisted_items() -> None:
     assert [item["item"] for item in pending["pendingItems"]] == ["wake word"]
 
 
+def test_last_message_title_typo_resolves_to_real_note_uuid() -> None:
+    client = FakeClient({
+        "notes/folders": {"jarvis": {"name": "Jarvis"}},
+        "notes/notes": {"uuid-bux": {
+            "folderId": "jarvis", "title": "bux Jarvis", "name": "bux Jarvis",
+            "content": "", "tags": [], "createdAt": 1, "updatedAt": 1,
+        }},
+    })
+    result = asyncio.run(BookShellDomains(client).notes_write({
+        "action": "update", "title": "bugs Jarvis",
+        "append_content": "La nota bux Jarvis se ha creado con éxito.",
+    }))
+    assert result["updated"] is True and result["verified"] is True
+    assert client.writes[-1][1] == "notes/notes/uuid-bux"
+    assert client.values["notes/notes"]["uuid-bux"]["content"] == "La nota bux Jarvis se ha creado con éxito."
+    assert client.values["notes/notes"]["uuid-bux"]["title"] == "bux Jarvis"
+
+
 def test_cancel_reminder_requires_explicit_confirmation() -> None:
     result = asyncio.run(BookShellDomains(FakeClient({})).reminder_update({"reminder_id": "r1", "action": "cancel"}))
     assert result["confirmationRequired"] is True

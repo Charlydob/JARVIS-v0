@@ -460,16 +460,28 @@ class BookShellDomains:
             persisted_before = await self.client.data("notes/notes") or {}
             if not note_id and arguments.get("title"):
                 wanted = _norm(arguments.get("title"))
-                matches = [key for key, value in persisted_before.items() if isinstance(value, dict) and _norm(value.get("title")) == wanted]
-                if len(matches) == 1:
-                    note_id = matches[0]
+                rows = [
+                    {"id": key, **value} for key, value in persisted_before.items()
+                    if isinstance(value, dict)
+                ]
+                exact = [row for row in rows if _norm(row.get("title")) == wanted]
+                matched, ambiguous = (exact[0], []) if len(exact) == 1 else _match(wanted, rows, "title")
+                if matched:
+                    note_id = str(matched["id"])
+                elif ambiguous:
+                    return {
+                        "updated": False, "clarificationRequired": True,
+                        "message": "Hay varias notas parecidas; indique cuál quiere actualizar, señor.",
+                        "candidates": [{"id": row.get("id"), "title": row.get("title")} for row in ambiguous],
+                    }
             if not note_id:
                 return {"updated": False, "clarificationRequired": True, "message": "Falta identificar la nota."}
             current_note = persisted_before.get(note_id) or {}
             if not current_note:
                 return {"updated": False, "verified": False, "message": "No encuentro esa nota."}
-            if "title" in allowed:
-                allowed["name"] = str(allowed["title"])
+            # `title` identifies the target in natural commands; it is not a
+            # rename request and must never be used as a Firebase path/ID.
+            allowed.pop("title", None)
             if arguments.get("append_content"):
                 existing = str(current_note.get("content") or "").rstrip()
                 added = str(arguments.get("append_content") or "").strip()
@@ -689,8 +701,8 @@ def register_domain_tools(registry: ToolRegistry, domains: BookShellDomains) -> 
     registry.register(Tool("bookshell_world_query", "Busca lugares guardados, locales, geografía o estancias por nombre, ciudad, categoría o país, incluyendo valoraciones.", {"type": "object", "properties": {"scope": {"type": "string", "enum": ["all", "saved", "places", "geography", "stays"]}, "query": {"type": "string"}, "city": {"type": "string"}, "category": {"type": "string"}, "country": {"type": "string"}, "limit": {"type": "integer"}}}, domains.world_query))
     registry.register(Tool("bookshell_world_write", "Guarda o actualiza un lugar/local en BookShell; no elimina datos.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "scope": {"type": "string", "enum": ["saved", "places", "geography"]}, "item_id": {"type": "string"}, "name": {"type": "string"}, "category": {"type": "string"}, "city": {"type": "string"}, "country": {"type": "string"}, "address": {"type": "string"}, "note": {"type": "string"}, "rating": {"type": "number"}, "lat": {"type": "number"}, "lon": {"type": "number"}}, "required": ["action", "scope"]}, domains.world_write))
     registry.register(Tool("bookshell_notes_query", "Busca notas o elementos pendientes de una checklist.", {"type": "object", "properties": {"query": {"type": "string"}, "pending_only": {"type": "boolean"}, "limit": {"type": "integer"}}}, domains.notes_query))
-    registry.register(Tool("bookshell_notes_folders_query", "Busca carpetas de Notes por nombre.", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, domains.notes_folders_query))
-    registry.register(Tool("bookshell_notes_folder_write", "Crea una carpeta de Notes si no existe y verifica su persistencia.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create"]}, "name": {"type": "string"}}, "required": ["action", "name"]}, domains.notes_folder_write))
+    registry.register(Tool("bookshell_notes_folder_query", "Busca carpetas de Notes por nombre.", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, domains.notes_folders_query))
+    registry.register(Tool("bookshell_notes_folder_create", "Crea una carpeta de Notes si no existe y verifica su persistencia.", {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}, domains.notes_folder_write))
     registry.register(Tool("bookshell_notes_write", "Crea o actualiza una nota visible en BookShell; admite checklists Markdown persistentes y no elimina notas.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "note_id": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}, "append_content": {"type": "string"}, "check_item": {"type": "string"}, "category": {"type": "string"}, "folderId": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["action"]}, domains.notes_write))
     registry.register(Tool("bookshell_recipes_query", "Busca recetas y devuelve ingredientes, pasos y detalles reales.", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, domains.recipes_query))
     registry.register(Tool("bookshell_recipes_write", "Crea o actualiza una receta básica cuando ingredientes/pasos están claros; no elimina recetas.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "recipe_id": {"type": "string"}, "title": {"type": "string"}, "notes": {"type": "string"}, "meal": {"type": "string"}, "servings": {"type": "integer"}, "tags": {"type": "array", "items": {"type": "string"}}, "ingredients": {"type": "array", "items": {"type": "object"}}, "steps": {"type": "array", "items": {"type": "object"}}}, "required": ["action"]}, domains.recipes_write))

@@ -27,7 +27,8 @@ def _domain(value: str) -> str:
         "gym": r"\b(gym|gimnasio|entren|ejercicio)\w*\b",
         "habits": r"\b(habito|racha)\w*\b",
         "finance": r"\b(gasto|saldo|cuenta|ingreso|finanz)\w*\b",
-        "notes": r"\b(nota|apunte)\w*\b",
+        "notes": r"\b(nota|apunte|checklist|carpeta|tarea)\w*\b",
+        "pc_web": r"\b(internet|web|wikipedia|url|navegador)\w*\b",
     }
     return next((name for name, pattern in rules.items() if re.search(pattern, normalized)), "general")
 
@@ -56,6 +57,11 @@ class FeedbackLearning:
 
     async def context_for(self, query: str) -> str | None:
         candidates = self.storage.feedback_examples(50)
+        query_domain = _domain(query)
+        candidates = [
+            item for item in candidates
+            if _domain(str(item.get("user_message") or "")) == query_domain
+        ]
         if not candidates:
             return None
         ranked = sorted(

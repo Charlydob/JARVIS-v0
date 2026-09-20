@@ -176,6 +176,180 @@ async def test_web_search_capability_is_reported_from_registry(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_exact_checklist_sequence_always_uses_real_notes_tools(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+    note = {"id": "check-1", "title": "mejoras para Jarvis", "content": "", "tags": ["checklist"]}
+    calls: list[tuple[str, dict]] = []
+
+    async def write(arguments):
+        calls.append(("write", dict(arguments)))
+        if arguments["action"] == "create":
+            return {"created": True, "verified": True, "id": note["id"], "note": dict(note)}
+        if arguments.get("append_content"):
+            note["content"] = "\n".join(filter(None, [note["content"], arguments["append_content"]]))
+        if arguments.get("check_item"):
+            note["content"] = note["content"].replace("- [ ] mejorar STT", "- [x] mejorar STT")
+        return {"updated": True, "verified": True, "id": note["id"], "note": dict(note)}
+
+    async def query(arguments):
+        calls.append(("query", dict(arguments)))
+        return {"items": [dict(note)], "pendingItems": [{"item": "wake word"}], "count": 1}
+
+    services.tools.register(Tool("bookshell_notes_write", "write", {"type": "object"}, write))
+    services.tools.register(Tool("bookshell_notes_query", "query", {"type": "object"}, query))
+
+    async def no_llm(*_args, **_kwargs):
+        raise AssertionError("clear checklist CRUD must not call Ollama")
+
+    services.ollama.chat_stream = no_llm
+
+    async def collect(_chunk: str) -> None:
+        return None
+
+    prompts = [
+        "crea un checklist llamado mejoras para Jarvis",
+        "añade mejorar STT y wake word",
+        "marca mejorar STT como hecho",
+        "qué queda",
+    ]
+    results = []
+    for index, prompt in enumerate(prompts):
+        results.append(await services.chat_stream({
+            "message": prompt, "conversation_id": "real-checklist", "turn_id": f"real-checklist-{index}",
+        }, collect))
+    assert [name for name, _ in calls] == ["write", "write", "write", "query"]
+    assert calls[1][1]["append_content"] == "- [ ] mejorar STT\n- [ ] wake word"
+    assert "wake word" in results[-1]["message"]
+    assert all(result["message"] for result in results)
+
+
+@pytest.mark.asyncio
+async def test_exact_folder_phrase_queries_then_creates_real_folder(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+    calls: list[tuple[str, dict]] = []
+
+    async def query(arguments):
+        calls.append(("query", dict(arguments)))
+        return {"items": [], "count": 0}
+
+    async def create(arguments):
+        calls.append(("create", dict(arguments)))
+        return {
+            "created": True, "verified": True, "id": "folder-1",
+            "folder": {"id": "folder-1", "name": arguments["name"]},
+        }
+
+    services.tools.register(Tool("bookshell_notes_folder_query", "query", {"type": "object"}, query))
+    services.tools.register(Tool("bookshell_notes_folder_create", "create", {"type": "object"}, create))
+
+    async def collect(_chunk: str) -> None:
+        return None
+
+    result = await services.chat_stream({
+        "message": "crea una carpeta en notas llamada mejora para Jarvis",
+        "turn_id": "real-folder-1",
+    }, collect)
+    assert calls == [
+        ("query", {"query": "mejora para Jarvis", "limit": 10}),
+        ("create", {"name": "mejora para Jarvis"}),
+    ]
+    assert result["message"] == "Carpeta disponible y verificada en BookShell, señor."
+
+
+@pytest.mark.asyncio
+async def test_exact_april_reminder_resumes_same_pending_action(tmp_path: Path, monkeypatch) -> None:
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = datetime(2026, 9, 20, 12, 0)
+            return fixed.replace(tzinfo=tz) if tz else fixed
+
+    monkeypatch.setattr("jarvis_core.services.datetime", FixedDateTime)
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+    writes: list[dict] = []
+
+    async def create(arguments):
+        writes.append(dict(arguments))
+        return {"created": True, "verified": True, "reminder": {"id": "birthday", **arguments}}
+
+    services.tools.register(Tool("bookshell_create_reminder", "create", {"type": "object"}, create))
+
+    async def collect(_chunk: str) -> None:
+        return None
+
+    first = await services.chat_stream({
+        "message": "crea recordatorio para el 12 de abril llamado mi cumpleaños",
+        "conversation_id": "birthday", "turn_id": "birthday-1",
+    }, collect)
+    second = await services.chat_stream({
+        "message": "a las diez de la mañana", "conversation_id": "birthday", "turn_id": "birthday-2",
+    }, collect)
+    assert first["message"] == "¿A qué hora, señor?"
+    assert second["message"] == "Recordatorio creado, señor."
+    assert len(writes) == 1
+    assert writes[0]["title"] == "mi cumpleaños"
+    assert writes[0]["target_date"] == "2027-04-12"
+    assert writes[0]["target_time"] == "10:00"
+
+
+@pytest.mark.asyncio
+async def test_pc_url_capability_and_fast_turns_are_deterministic(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+    opened: list[str] = []
+
+    async def open_url(arguments):
+        opened.append(arguments["url"])
+        return {"opened": True, "verified": True, "url": arguments["url"]}
+
+    services.tools.register(Tool("pc_open_url", "open", {"type": "object"}, open_url))
+    feedback_calls = 0
+
+    async def feedback(_message):
+        nonlocal feedback_calls
+        feedback_calls += 1
+        return "irrelevant"
+
+    services.feedback.context_for = feedback
+
+    async def fake_stream(_messages, _context=None):
+        yield "A su servicio, señor."
+
+    services.ollama.chat_stream = fake_stream
+
+    async def collect(_chunk: str) -> None:
+        return None
+
+    capability = await services.chat_stream({"message": "¿tienes internet?", "turn_id": "capability-1"}, collect)
+    search = await services.chat_stream({"message": "búscame la página de Wikipedia de Lovecraft", "turn_id": "search-1"}, collect)
+    opened_result = await services.chat_stream({"message": "abre https://es.wikipedia.org/ en el ordenador", "turn_id": "open-1"}, collect)
+    wake = await services.chat_stream({"message": "JARVIS", "turn_id": "wake-1"}, collect)
+    assert "puedo abrir URLs" in capability["message"] and "no tengo búsqueda web general" in capability["message"]
+    assert search["message"] == "No tengo búsqueda web configurada actualmente, señor."
+    assert opened_result["message"] == "Fuente abierta en el navegador, señor."
+    assert opened == ["https://es.wikipedia.org/"]
+    assert wake["message"] == "A su servicio, señor."
+    assert feedback_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_fast_path_cannot_claim_external_success_without_tool(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+
+    async def fake_stream(_messages, _context=None):
+        yield "Hecho, guardado y completado con éxito."
+
+    services.ollama.chat_stream = fake_stream
+    chunks: list[str] = []
+
+    async def collect(chunk: str) -> None:
+        chunks.append(chunk)
+
+    result = await services.chat_stream({"message": "guarda esto en el sistema", "turn_id": "no-tool-success-1"}, collect)
+    assert result["message"] == "No he ejecutado esa acción porque no hay una herramienta adecuada seleccionada, señor."
+    assert chunks == [result["message"]]
+
+
+@pytest.mark.asyncio
 async def test_silence_and_duplicate_utterance_are_discarded_before_ollama(tmp_path: Path) -> None:
     services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
     payload = {

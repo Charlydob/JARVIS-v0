@@ -54,16 +54,26 @@ class ToolRegistry:
         """Narrow BookShell domains before model routing without choosing the action itself."""
         normalized = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode()
         rules = {
-            "books": r"\b(libro|libros|pagina|leer|leyendo|lectura|leido|book|books|page|reading)\b",
+            "books": r"\b(libro|libros|leer|leyendo|lectura|leido|book|books|reading)\b",
             "gym": r"\b(gym|gimnasio|entren|ejercicio|series?|repeticiones?|kilos?|press banca|levante|pesas?)\b",
             "habits": r"\b(habito|habitos|racha|cumpl|pendientes? hoy)\b",
             "finance": r"\b(gasto|gastado|ingreso|sueldo|transfer|francos?|chf|euros?|saldo|cuentas?|movimiento|spent|expense|income|balance)\b",
             "reminder": r"\b(recordatori[oa]s?|recuerdame|agenda|guardia|dentista|clase|cita|evento|que tengo hoy|que tengo esta semana|remind|reminders?|schedule|appointment)\b",
             "world": r"\b(lugar|sitio|cafeteria|restaurante|local|ubicacion|guardado en|valoracion|puntuacion)\b",
-            "notes": r"\b(nota|notas|apunte|buscar en mis notas)\b",
+            "notes": r"\b(nota|notas|apunte|checklist|lista de tareas|tareas|carpeta|subcarpeta|buscar en mis notas)\b|\bmarca\b.+\bcomo hecho\b",
             "recipes": r"\b(receta|recetas|ingredientes?|cocinar|preparacion)\b",
         }
         domains = {domain for domain, pattern in rules.items() if re.search(pattern, normalized)}
+        web_context = bool(re.search(r"\b(wikipedia|pagina web|sitio web|internet|url|web)\b", normalized))
+        reading_page = bool(re.search(
+            r"\b(?:en|por|que|cual)\s+(?:la\s+)?pagina\b.*\b(?:voy|libro|lectura)\b|"
+            r"\bpagina\s+(?:del|de un|de mi)\s+libro\b|\bvoy\s+por\s+la\s+pagina\b",
+            normalized,
+        ))
+        if reading_page and not web_context:
+            domains.add("books")
+        if web_context:
+            domains.discard("books")
         if not domains:
             return []
         aliases = {
@@ -76,6 +86,13 @@ class ToolRegistry:
         for name, tool in self._tools.items():
             if any(name.startswith(prefix) for domain in domains for prefix in aliases[domain]):
                 selected.append(tool.ollama_definition())
+        if "notes" in domains:
+            if re.search(r"\b(?:sub)?carpeta\b", normalized):
+                priority = ["bookshell_notes_folder_query", "bookshell_notes_folder_create", "bookshell_notes_query"]
+            else:
+                priority = ["bookshell_notes_query", "bookshell_notes_write", "bookshell_notes_folder_query"]
+            order = {name: index for index, name in enumerate(priority)}
+            selected.sort(key=lambda item: order.get(str(item.get("function", {}).get("name", "")), len(order)))
         return selected[:3]
 
     def direct_query(self, message: str) -> tuple[str, dict[str, Any]] | None:
@@ -98,15 +115,25 @@ class ToolRegistry:
         normalized = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode()
         if re.search(r"\b(anad\w*|agreg\w*|cre\w*|apunt\w*|anot\w*|recuerdame|ponme|cambia|actualiza|cancela|elimina|borra|marca)\b", normalized):
             return None
+        web_context = bool(re.search(r"\b(wikipedia|pagina web|sitio web|internet|url|web)\b", normalized))
+        reading_page = bool(re.search(
+            r"\b(?:en|por|que|cual)\s+(?:la\s+)?pagina\b.*\b(?:voy|libro|lectura)\b|"
+            r"\bpagina\s+(?:del|de un|de mi)\s+libro\b|\bvoy\s+por\s+la\s+pagina\b",
+            normalized,
+        ))
         queries = (
             (r"\b(recordatori[oa]s?|agenda|citas?|guardia)\b", "bookshell_reminders_query"),
-            (r"\b(libro|libros|pagina|leyendo|lectura)\b", "bookshell_books_query"),
+            (r"\b(libro|libros|leyendo|lectura)\b", "bookshell_books_query"),
             (r"\b(gym|gimnasio|entrenamiento|ejercicio)\b", "bookshell_gym_query"),
             (r"\b(habito|habitos|racha)\b", "bookshell_habits_query"),
             (r"\b(gasto|saldo|cuenta|ingreso|finanzas?)\b", "bookshell_finance_query"),
-            (r"\b(nota|notas|apunte)\b", "bookshell_notes_query"),
+            (r"\b(nota|notas|apunte|checklist|lista de tareas|tareas)\b|\bmarca\b.+\bcomo hecho\b", "bookshell_notes_query"),
             (r"\b(receta|recetas|ingredientes)\b", "bookshell_recipes_query"),
         )
+        if reading_page and not web_context:
+            return "bookshell_books_query"
+        if web_context:
+            return None
         return next((name for pattern, name in queries if re.search(pattern, normalized)), None)
 
     def fallback_read(
@@ -161,6 +188,7 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             raise ValueError(f"Unknown tool: {name}")
+        arguments = self._validated_arguments(tool, arguments)
         started = time.perf_counter()
         try:
             result = await tool.handler(arguments)
@@ -169,6 +197,55 @@ class ToolRegistry:
             raise
         rendered = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
         return rendered
+
+    @staticmethod
+    def _validated_arguments(tool: Tool, arguments: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(arguments, dict):
+            raise ValueError(f"Invalid arguments for {tool.name}: expected an object")
+        properties = dict(tool.parameters.get("properties") or {})
+        required = {str(item) for item in tool.parameters.get("required") or []}
+        cleaned: dict[str, Any] = {}
+        null_tokens = {"", "null", "none", "undefined"}
+        for key, value in arguments.items():
+            schema = properties.get(key)
+            if not isinstance(schema, dict):
+                cleaned[key] = value
+                continue
+            expected = schema.get("type")
+            if isinstance(value, str) and value.strip().casefold() in null_tokens:
+                value = None
+            if value is None:
+                if key in required:
+                    raise ValueError(f"Invalid arguments for {tool.name}: {key} is required")
+                continue
+            if expected == "array" and isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"Invalid arguments for {tool.name}: {key} must be a JSON array") from exc
+            type_valid = {
+                "string": isinstance(value, str),
+                "array": isinstance(value, list),
+                "object": isinstance(value, dict),
+                "integer": isinstance(value, int) and not isinstance(value, bool),
+                "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+                "boolean": isinstance(value, bool),
+            }.get(str(expected), True)
+            if not type_valid:
+                raise ValueError(f"Invalid arguments for {tool.name}: {key} must be {expected}")
+            if isinstance(schema.get("enum"), list) and value not in schema["enum"]:
+                raise ValueError(f"Invalid arguments for {tool.name}: {key} has an unsupported value")
+            if expected == "array" and isinstance(schema.get("items"), dict):
+                item_type = schema["items"].get("type")
+                if item_type == "string" and any(not isinstance(item, str) for item in value):
+                    raise ValueError(f"Invalid arguments for {tool.name}: every {key} item must be string")
+                if item_type == "object" and any(not isinstance(item, dict) for item in value):
+                    raise ValueError(f"Invalid arguments for {tool.name}: every {key} item must be object")
+            cleaned[key] = value
+        missing = [key for key in required if key not in cleaned]
+        if missing:
+            raise ValueError(f"Invalid arguments for {tool.name}: missing {', '.join(sorted(missing))}")
+        return cleaned
 
     def load_modules(self, modules: str) -> None:
         for module_name in (item.strip() for item in modules.split(",")):

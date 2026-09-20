@@ -125,14 +125,36 @@ def test_natural_notes_phrases_win_and_book_reading_is_an_upsert() -> None:
     }
     folder = route_direct_intent("crea una carpeta en notas llamada Mejoras para JARVIS", today)
     assert (folder.kind, folder.tool, folder.arguments) == (
-        "note_folder_create", "bookshell_notes_folder_write",
-        {"action": "create", "name": "Mejoras para JARVIS"},
+        "note_folder_create", "bookshell_notes_folder_create",
+        {"name": "Mejoras para JARVIS"},
     )
     reading = route_direct_intent("estoy leyendo El extranjero de Albert Camus", today)
     assert (reading.kind, reading.operation, reading.arguments) == (
         "book_reading", "update",
         {"title": "El extranjero", "author": "Albert Camus", "current_page": 0, "status": "reading"},
     )
+    explicit_add = route_direct_intent(
+        "quiero que lo anotes añadiendo el libro El extranjero de Albert Camus, página 0", today,
+    )
+    assert (explicit_add.kind, explicit_add.tool, explicit_add.arguments) == (
+        "book_reading", "bookshell_create_book",
+        {"title": "El extranjero", "author": "Albert Camus", "current_page": 0, "status": "reading"},
+    )
+
+
+def test_natural_reminder_date_and_web_pages_do_not_collide_with_books() -> None:
+    now = datetime(2026, 9, 20, 12, 0, tzinfo=ZoneInfo("Europe/Zurich"))
+    reminder = route_direct_intent(
+        "crea un recordatorio para el 12 de abril que se llame mi cumpleaños", now.date(), now,
+    )
+    assert reminder.kind == "reminder_create"
+    assert reminder.arguments["title"] == "mi cumpleaños"
+    assert reminder.arguments["target_date"] == "2027-04-12"
+    assert reminder.missing_fields == ("time",)
+    assert reminder.clarification == "¿A qué hora, señor?"
+    assert route_direct_intent("me gustaría que buscase su página de wikipedia", now.date(), now) is None
+    pc = route_direct_intent("abre https://es.wikipedia.org/ en el ordenador", now.date(), now)
+    assert (pc.kind, pc.tool, pc.arguments["url"]) == ("pc_open_url", "pc_open_url", "https://es.wikipedia.org/")
 
 
 def test_book_write_keeps_title_and_gym_write_wins_over_read() -> None:
