@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+from uuid import uuid4
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any
@@ -162,6 +163,50 @@ class BookShellClient:
                 "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)},
                 **({"message": "La página no aparece guardada al volver a consultar BookShell."} if not verified else {})}
 
+    async def create_book(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        title = str(arguments.get("title") or "").strip()
+        if not title:
+            return {"created": False, "clarificationRequired": True, "message": "Falta el título del libro."}
+        now = int(time.time() * 1000)
+        current_page = max(0, int(arguments.get("current_page") or 0))
+        pages_value = arguments.get("pages")
+        pages = max(0, int(pages_value)) if pages_value is not None else 0
+        if pages and current_page > pages:
+            return {"created": False, "message": "La página actual supera el total indicado."}
+        books = await self.books()
+        author = str(arguments.get("author") or "").strip() or None
+        exact = next((
+            {"id": identifier, **book} for identifier, book in books.items()
+            if isinstance(book, dict)
+            and str(book.get("title") or "").strip().casefold() == title.casefold()
+            and str(book.get("author") or "").strip().casefold() == str(author or "").casefold()
+        ), None)
+        if exact:
+            return {"created": False, "verified": True, "duplicate": True, "book": self._summary(exact)}
+        book_id = str(uuid4())
+        status = str(arguments.get("status") or ("planned" if current_page == 0 else "reading"))
+        if status not in {"planned", "reading", "finished"}:
+            status = "planned" if current_page == 0 else "reading"
+        book = {
+            "title": title, "author": author, "year": None, "pages": pages,
+            "currentPage": current_page, "genre": None, "language": None,
+            "country": None, "countryLabel": None, "status": status,
+            "favorite": False, "finishedPast": False,
+            "createdAt": now, "updatedAt": now,
+        }
+        write_started = time.perf_counter()
+        await self.put_data(f"books/books/{book_id}", book)
+        write_ms = (time.perf_counter() - write_started) * 1000
+        readback_started = time.perf_counter()
+        saved = (await self.books()).get(book_id)
+        readback_ms = (time.perf_counter() - readback_started) * 1000
+        verified = bool(saved) and int(saved.get("currentPage") or 0) == current_page
+        return {
+            "created": verified, "verified": verified,
+            "book": self._summary({"id": book_id, **(saved or book)}),
+            "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)},
+        }
+
     async def create_reminder(self, arguments: dict[str, Any]) -> dict[str, Any]:
         minutes = max(0, int(arguments.get("minutes_before") or 0))
         relative_day = str(arguments.get("relative_day") or "")
@@ -285,6 +330,17 @@ def register_tools(registry: ToolRegistry) -> None:
             "required": ["page"],
         },
         lambda args: client.update_progress(int(args["page"]), args.get("title")),
+    ))
+    registry.register(Tool(
+        "bookshell_create_book",
+        "Añade un libro real a BookShell sin inventar el número total de páginas.",
+        {"type": "object", "properties": {
+            "title": {"type": "string"}, "author": {"type": "string"},
+            "current_page": {"type": "integer", "minimum": 0},
+            "pages": {"type": "integer", "minimum": 0},
+            "status": {"type": "string", "enum": ["planned", "reading", "finished"]},
+        }, "required": ["title"]},
+        client.create_book,
     ))
     registry.register(Tool(
         "bookshell_create_reminder",

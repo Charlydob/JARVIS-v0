@@ -36,6 +36,8 @@ No menciones mansiones, desayunos ni detalles personales que el usuario no haya 
 Un saludo se responde con brevedad, sin añadir noticias, clima ni supuestos.
 No antepongas etiquetas de rol como «assistant», «user» o «JARVIS» a la respuesta.
 No afirmes que una acción externa se ejecutó salvo que recibas un resultado de tool explícitamente exitoso y verificado.
+No inventes especificaciones electrónicas ni compatibilidades técnicas: distingue datos comprobados de inferencias y declara la incertidumbre.
+No uses servicios cloud para resolver una consulta sin autorización explícita del usuario para esa llamada concreta.
 La disponibilidad de capacidades viene únicamente de AVAILABLE TOOLS. Nunca inventes que tienes o no tienes permisos.
 Para datos dinámicos de BookShell, consulta siempre la herramienta de lectura; la memoria y respuestas previas no son fuente de verdad.
 Si necesitas información actual y no aparece en un contexto de herramienta, di claramente que no dispones de ella."""
@@ -361,6 +363,7 @@ class JarvisServices:
         self._pending_intents: dict[str, PendingAction] = {}
         self._recent_completed_intents: dict[str, tuple[DirectIntent, float]] = {}
         self._recent_query_intents: dict[str, tuple[DirectIntent, float]] = {}
+        self._recent_notes: dict[str, tuple[dict[str, Any], float]] = {}
         self._action_locks: dict[str, asyncio.Lock] = {}
         self._action_results: dict[str, str] = {}
 
@@ -557,6 +560,29 @@ class JarvisServices:
             TOOL_LOGGER.info("turn_id=%s pending_action_expired=true pending_action_id=%s", turn_id, pending.id)
             pending = None
         direct = route_direct_intent(routing_message, today, local_now)
+        if direct is None and re.search(r"\besa\s+nota\b", normalized_message) and re.search(r"\b(anade|agrega|incorpora)\b", normalized_message):
+            recent_note = self._recent_notes.get(conversation_id)
+            added = re.search(r"(?is)(?:linea|contenido)\s*(?::|que\s+diga)?\s*(.+)$", message)
+            if recent_note and time.monotonic() - recent_note[1] <= 300 and added:
+                note = recent_note[0]
+                direct = DirectIntent(
+                    "note_update", "bookshell_notes_write",
+                    {"action": "update", "note_id": note.get("id"), "append_content": added.group(1).strip()},
+                    domain="notes", operation="update",
+                )
+        if direct is None and re.search(r"\b(?:muestrame|abre)\s+(?:la\s+)?fuente\b", normalized_message):
+            assistant_text = next((str(item.get("content") or "") for item in reversed(previous) if item.get("role") == "assistant"), "")
+            markdown_sources = re.findall(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", assistant_text)
+            plain_sources = [("Fuente", value.rstrip(".,;")) for value in re.findall(r"https?://[^\s)]+", assistant_text)]
+            sources = markdown_sources or plain_sources
+            unique_sources = list(dict.fromkeys((title, url) for title, url in sources))
+            if len(unique_sources) == 1:
+                title, url = unique_sources[0]
+                direct = DirectIntent("pc_open_url", "pc_open_url", {"url": url, "title": title}, domain="pc", operation="open")
+            elif len(unique_sources) > 1:
+                direct = DirectIntent("pc_open_url", clarification="Hay varias fuentes; indique cuál quiere abrir, señor.", domain="pc", operation="open")
+            else:
+                direct = DirectIntent("pc_open_url", clarification="No hay una fuente concreta en la respuesta anterior, señor.", domain="pc", operation="open")
         if direct is None:
             recent_query = self._recent_query_intents.get(conversation_id)
             if recent_query and time.monotonic() - recent_query[1] <= 120:
@@ -703,6 +729,13 @@ class JarvisServices:
                             self._recent_completed_intents[conversation_id] = (direct, time.monotonic())
                         if direct.domain == "reminders" and direct.operation in {"list", "search"}:
                             self._recent_query_intents[conversation_id] = (direct, time.monotonic())
+                        if direct.kind in {"note_create", "note_update", "checklist_create", "checklist_mark"}:
+                            note = parsed.get("note") or {}
+                            if not note and parsed.get("id"):
+                                note = {"id": parsed.get("id"), "title": (direct.arguments or {}).get("title")}
+                            if note:
+                                note.setdefault("id", parsed.get("id"))
+                                self._recent_notes[conversation_id] = (note, time.monotonic())
                         if len(self._action_results) > 200:
                             self._action_results.pop(next(iter(self._action_results)))
                 except Exception as exc:
@@ -712,7 +745,7 @@ class JarvisServices:
                     technical_cause = re.sub(r"\s+", " ", str(exc)).strip()[:240] or type(exc).__name__
                     answer = (
                         f"No se pudo guardar: {technical_cause}, señor."
-                        if direct.kind in {"book_update", "reminder_create"}
+                        if direct.kind in {"book_update", "book_create", "reminder_create", "note_create", "note_update", "checklist_create", "checklist_mark"}
                         else f"No he podido consultar BookShell: {technical_cause}, señor."
                     )
                 PERFORMANCE_LOGGER.info(

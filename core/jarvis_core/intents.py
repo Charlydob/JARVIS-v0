@@ -178,6 +178,7 @@ def _reminder_delete_queries(message: str) -> list[str]:
             r"(?i)^\s*(?:(?:el|la|los|las)\s+)?recordatori[oa]s?\s*(?:de(?:l)?\s+)?",
             "", part,
         ).strip(" \t\r\n'\"¿?¡!,.-")
+        cleaned = re.sub(r"(?i)^que\s+se\s+llama\s+", "", cleaned).strip()
         if cleaned:
             queries.append(cleaned)
     return queries
@@ -185,6 +186,44 @@ def _reminder_delete_queries(message: str) -> list[str]:
 
 def route_direct_intent(message: str, today: date, now: datetime | None = None) -> DirectIntent | None:
     text = normalize(message)
+    purchased = re.search(
+        r"(?is)\bhe\s+comprado\s+(.+?)\s+de\s+([^.,]+?)(?=\s*[.,]|$)", message,
+    )
+    if purchased and re.search(r"\b(anad|agreg|apunt)", text):
+        page_match = re.search(r"\bpagina\s+(\d{1,5})\b", text)
+        status = "planned" if re.search(r"\b(?:todavia|aun)\s+no\s+(?:lo\s+)?he\s+empezado\b", text) else "reading"
+        return DirectIntent("book_create", "bookshell_create_book", {
+            "title": purchased.group(1).strip(), "author": purchased.group(2).strip(),
+            "current_page": int(page_match.group(1)) if page_match else 0, "status": status,
+        }, domain="books", operation="create")
+
+    checklist_create = re.search(r"(?is)\bcrea\s+(?:una\s+)?(?:nota\s+(?:tipo\s+)?)?checklist\s+(?:llamada|titulada)\s+(.+?)\s+(?:con\s+)?(?:los\s+)?(?:puntos|elementos|tareas)\s*[:：]?\s*(.+)$", message)
+    if checklist_create:
+        items = [item.strip(" .") for item in re.split(r"\s*[,;]\s*|\s+y\s+(?=[^,;]+$)", checklist_create.group(2), flags=re.I) if item.strip(" .")]
+        return DirectIntent("checklist_create", "bookshell_notes_write", {
+            "action": "create", "title": checklist_create.group(1).strip(" ."),
+            "content": "\n".join(f"- [ ] {item}" for item in items), "tags": ["checklist"],
+        }, domain="notes", operation="create")
+
+    note_create = re.search(r"(?is)\bcrea\s+(?:una\s+)?nota\s+(?:llamada|titulada)\s+(.+?)\s+(?:con\s+)?(?:el\s+)?contenido\s*[:：]?\s*(.+)$", message)
+    if note_create:
+        return DirectIntent("note_create", "bookshell_notes_write", {
+            "action": "create", "title": note_create.group(1).strip(" ."),
+            "content": note_create.group(2).strip(),
+        }, domain="notes", operation="create")
+
+    check_mark = re.search(r"(?is)\b(?:marca|completa)\s+(.+?)\s+(?:en|de)\s+(?:la\s+)?(?:nota\s+)?(.+)$", message)
+    if check_mark and ("checklist" in text or "nota" in text):
+        return DirectIntent("checklist_mark", "bookshell_notes_write", {
+            "action": "update", "title": check_mark.group(2).strip(" ."),
+            "check_item": check_mark.group(1).strip(" ."),
+        }, domain="notes", operation="update")
+
+    pending_checklist = re.search(r"(?is)\bque\s+(?:queda|falta|esta\s+pendiente)\b.*\b(?:checklist|nota)\s+(.+)$", text)
+    if pending_checklist:
+        return DirectIntent("checklist_pending", "bookshell_notes_query", {
+            "query": pending_checklist.group(1).strip(" .?"), "pending_only": True, "limit": 10,
+        }, domain="notes", operation="read")
     page = re.search(
         r"\bpagina(?:\s+(?:a|en))?\s+(\d{1,5})\b|\b(?:voy\s+(?:por|en|a)\s+la|hasta\s+la)\s+(\d{1,5})\b",
         text,
@@ -391,6 +430,18 @@ def render_direct_result(
         return f"Va por la página {page} de {pages}, señor."
     if kind == "book_update":
         return "Anotado, señor." if result.get("updated") and result.get("verified") else str(result.get("message") or "BookShell no confirmó la escritura, señor.")
+    if kind == "book_create":
+        if result.get("duplicate"):
+            return "Ese libro ya estaba en BookShell, señor."
+        return "Libro añadido, señor." if result.get("created") and result.get("verified") else str(result.get("message") or "BookShell no confirmó el libro, señor.")
+    if kind in {"note_create", "note_update", "checklist_create", "checklist_mark"}:
+        succeeded = (result.get("created") or result.get("updated")) and result.get("verified")
+        return "Hecho y verificado en BookShell, señor." if succeeded else str(result.get("message") or "BookShell no confirmó la nota, señor.")
+    if kind == "checklist_pending":
+        items = [str(item.get("item")) for item in result.get("pendingItems") or []]
+        return ("Quedan pendientes: " + "; ".join(items) + ", señor.") if items else "No queda ningún elemento pendiente, señor."
+    if kind == "pc_open_url":
+        return "Fuente abierta en el navegador, señor." if result.get("opened") else str(result.get("message") or "No pude abrir la fuente, señor.")
     if kind == "gym_last":
         workout = result.get("workout") or {}
         if not workout:

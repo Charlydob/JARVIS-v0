@@ -16,7 +16,10 @@ interface ContinuousVoiceOptions {
   onError: (message: string) => void
 }
 
-const SILENCE_MS = 3000
+const configuredSilenceSeconds = Number(import.meta.env.JARVIS_VAD_SILENCE_SECONDS ?? '1.5')
+const SILENCE_MS = Number.isFinite(configuredSilenceSeconds)
+  ? Math.max(0.5, Math.min(10, configuredSilenceSeconds)) * 1000
+  : 1500
 const MAX_RECORDING_MS = 30_000
 const MAX_IDLE_SEGMENT_MS = 15_000
 const RECORDER_STOP_TIMEOUT_MS = 4000

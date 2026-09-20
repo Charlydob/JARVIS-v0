@@ -397,16 +397,65 @@ class BookShellDomains:
         if query:
             rows = [row for row in rows if query in _norm(f"{row.get('title')} {row.get('content')} {' '.join(row.get('tags') or [])}")]
         rows.sort(key=lambda row: int(row.get("updatedAt") or row.get("createdAt") or 0), reverse=True)
-        return {"items": rows[: min(50, int(arguments.get("limit") or 10))], "count": len(rows)}
+        result = {"items": rows[: min(50, int(arguments.get("limit") or 10))], "count": len(rows)}
+        if arguments.get("pending_only"):
+            pending = []
+            for row in rows:
+                for line in str(row.get("content") or "").splitlines():
+                    match = re.match(r"^\s*-\s*\[\s\]\s*(.+?)\s*$", line)
+                    if match:
+                        pending.append({"noteId": row.get("id"), "title": row.get("title"), "item": match.group(1)})
+            result["pendingItems"] = pending
+            result["count"] = len(pending)
+        return result
 
     async def notes_write(self, arguments: dict[str, Any]) -> dict[str, Any]:
         now = int(time.time() * 1000)
         action = str(arguments.get("action") or "create")
         allowed = {key: arguments[key] for key in ("title", "content", "category", "folderId", "tags") if arguments.get(key) is not None}
+        folders = await self.client.data("notes/folders") or {}
+        folder_id = str(allowed.get("folderId") or "").strip()
+        if not folder_id:
+            folder_id = next((
+                key for key, value in folders.items()
+                if isinstance(value, dict) and str(value.get("name") or "").strip().casefold() == "jarvis"
+            ), "")
+        if not folder_id:
+            folder_id = str(uuid4())
+            await self.client.put_data(f"notes/folders/{folder_id}", {
+                "name": "JARVIS", "color": "#00d4ff", "createdAt": now,
+                "parentId": "", "isPrivate": False, "pin": "", "emoji": "📝",
+                "category": "", "tags": [], "defaultNoteKind": "text",
+            })
+        allowed["folderId"] = folder_id
         if action == "update":
             note_id = str(arguments.get("note_id") or "")
+            persisted_before = await self.client.data("notes/notes") or {}
+            if not note_id and arguments.get("title"):
+                wanted = _norm(arguments.get("title"))
+                matches = [key for key, value in persisted_before.items() if isinstance(value, dict) and _norm(value.get("title")) == wanted]
+                if len(matches) == 1:
+                    note_id = matches[0]
             if not note_id:
                 return {"updated": False, "clarificationRequired": True, "message": "Falta identificar la nota."}
+            current_note = persisted_before.get(note_id) or {}
+            if arguments.get("append_content"):
+                existing = str(current_note.get("content") or "").rstrip()
+                added = str(arguments.get("append_content") or "").strip()
+                allowed["content"] = f"{existing}\n{added}".strip()
+            if arguments.get("check_item"):
+                wanted_item = _norm(arguments.get("check_item"))
+                lines = str(current_note.get("content") or "").splitlines()
+                changed = False
+                for index, line in enumerate(lines):
+                    match = re.match(r"^(\s*-\s*)\[\s\](\s*)(.+?)\s*$", line)
+                    if match and wanted_item in _norm(match.group(3)):
+                        lines[index] = f"{match.group(1)}[x]{match.group(2)}{match.group(3)}"
+                        changed = True
+                        break
+                if not changed:
+                    return {"updated": False, "verified": False, "message": "No encuentro ese elemento pendiente."}
+                allowed["content"] = "\n".join(lines)
             write_started = time.perf_counter(); await self.client.patch_data(f"notes/notes/{note_id}", {**allowed, "updatedAt": now}); write_ms = (time.perf_counter() - write_started) * 1000
             readback_started = time.perf_counter()
             persisted = await self.client.data("notes/notes") or {}
@@ -415,7 +464,18 @@ class BookShellDomains:
             verified = bool(saved) and all(saved.get(key) == value for key, value in allowed.items())
             return {"updated": verified, "verified": verified, "id": note_id, "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}}
         note_id = str(uuid4())
-        note = {"type": "text", "category": "Normal", "tags": [], **allowed, "createdAt": now, "updatedAt": now}
+        title = str(allowed.get("title") or "").strip()
+        note = {
+            "folderId": folder_id, "title": title, "name": title,
+            "content": str(allowed.get("content") or "").strip(), "linkRefs": [],
+            "code": "", "noteKind": "text", "codeLanguage": "general",
+            "previewHtml": "", "type": "note", "url": "",
+            "category": str(allowed.get("category") or ""), "tags": list(allowed.get("tags") or []),
+            "imageUrl": "", "imagePath": "", "imageUpdatedAt": 0,
+            "attachments": {"images": []}, "tagImageKey": "", "rating": None,
+            "visitsCount": 0, "lastVisitedAt": 0, "location": {}, "person": {},
+            "createdAt": now, "updatedAt": now,
+        }
         write_started = time.perf_counter(); await self.client.put_data(f"notes/notes/{note_id}", note); write_ms = (time.perf_counter() - write_started) * 1000
         readback_started = time.perf_counter()
         persisted = await self.client.data("notes/notes") or {}
@@ -570,7 +630,7 @@ def register_domain_tools(registry: ToolRegistry, domains: BookShellDomains) -> 
     registry.register(Tool("bookshell_reminder_update", "Modifica, completa o cancela un recordatorio existente. Cancelar requiere confirmed=true; completar y reprogramar no.", {"type": "object", "properties": {"reminder_id": {"type": "string"}, "action": {"type": "string", "enum": ["update", "complete", "cancel"]}, "title": {"type": "string"}, "description": {"type": "string"}, "target_date": {"type": "string"}, "target_time": {"type": "string"}, "confirmed": {"type": "boolean"}}, "required": ["reminder_id", "action"]}, domains.reminder_update))
     registry.register(Tool("bookshell_world_query", "Busca lugares guardados, locales, geografía o estancias por nombre, ciudad, categoría o país, incluyendo valoraciones.", {"type": "object", "properties": {"scope": {"type": "string", "enum": ["all", "saved", "places", "geography", "stays"]}, "query": {"type": "string"}, "city": {"type": "string"}, "category": {"type": "string"}, "country": {"type": "string"}, "limit": {"type": "integer"}}}, domains.world_query))
     registry.register(Tool("bookshell_world_write", "Guarda o actualiza un lugar/local en BookShell; no elimina datos.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "scope": {"type": "string", "enum": ["saved", "places", "geography"]}, "item_id": {"type": "string"}, "name": {"type": "string"}, "category": {"type": "string"}, "city": {"type": "string"}, "country": {"type": "string"}, "address": {"type": "string"}, "note": {"type": "string"}, "rating": {"type": "number"}, "lat": {"type": "number"}, "lon": {"type": "number"}}, "required": ["action", "scope"]}, domains.world_write))
-    registry.register(Tool("bookshell_notes_query", "Busca notas por título/contenido/tags o devuelve las notas recientes.", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, domains.notes_query))
-    registry.register(Tool("bookshell_notes_write", "Crea o actualiza una nota básica en BookShell; no elimina notas.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "note_id": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}, "category": {"type": "string"}, "folderId": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["action"]}, domains.notes_write))
+    registry.register(Tool("bookshell_notes_query", "Busca notas o elementos pendientes de una checklist.", {"type": "object", "properties": {"query": {"type": "string"}, "pending_only": {"type": "boolean"}, "limit": {"type": "integer"}}}, domains.notes_query))
+    registry.register(Tool("bookshell_notes_write", "Crea o actualiza una nota visible en BookShell; admite checklists Markdown persistentes y no elimina notas.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "note_id": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}, "append_content": {"type": "string"}, "check_item": {"type": "string"}, "category": {"type": "string"}, "folderId": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["action"]}, domains.notes_write))
     registry.register(Tool("bookshell_recipes_query", "Busca recetas y devuelve ingredientes, pasos y detalles reales.", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, domains.recipes_query))
     registry.register(Tool("bookshell_recipes_write", "Crea o actualiza una receta básica cuando ingredientes/pasos están claros; no elimina recetas.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "recipe_id": {"type": "string"}, "title": {"type": "string"}, "notes": {"type": "string"}, "meal": {"type": "string"}, "servings": {"type": "integer"}, "tags": {"type": "array", "items": {"type": "string"}}, "ingredients": {"type": "array", "items": {"type": "object"}}, "steps": {"type": "array", "items": {"type": "object"}}}, "required": ["action"]}, domains.recipes_write))

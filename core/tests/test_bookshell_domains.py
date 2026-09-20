@@ -22,6 +22,8 @@ class FakeClient:
         parts = path.split("/")
         if parts[:2] == ["notes", "notes"]:
             self.values.setdefault("notes/notes", {})[parts[2]] = value
+        if parts[:2] == ["notes", "folders"]:
+            self.values.setdefault("notes/folders", {})[parts[2]] = value
         if parts[:3] == ["gym", "gym", "workouts"]:
             root = self.values.setdefault("gym/gym", {})
             root.setdefault("workouts", {}).setdefault(parts[3], {})[parts[4]] = value
@@ -38,6 +40,8 @@ class FakeClient:
             self.values.setdefault("world", {}).setdefault(parts[1], {}).setdefault(parts[2], {}).update(value)
         if parts[:2] == ["recipes", "items"]:
             self.values.setdefault("recipes/items", {}).setdefault(parts[2], {}).update(value)
+        if parts[:2] == ["notes", "notes"]:
+            self.values.setdefault("notes/notes", {}).setdefault(parts[2], {}).update(value)
         return {"ok": True}
 
     async def _request(self, _method: str, _path: str, **_kwargs: Any) -> dict[str, Any]:
@@ -110,7 +114,34 @@ def test_world_note_and_recipe_writes_use_existing_data_paths() -> None:
     recipe = asyncio.run(domains.recipes_write({"action": "create", "title": "Fixture recipe"}))
     assert world["created"] and note["created"] and recipe["created"]
     assert world["verified"] is True and note["verified"] is True and recipe["verified"] is True
-    assert [path.split("/")[0] for _, path, _ in client.writes] == ["world", "notes", "recipes"]
+    assert [path.split("/")[0] for _, path, _ in client.writes] == ["world", "notes", "notes", "recipes"]
+    saved_note = next(iter(client.values["notes/notes"].values()))
+    assert saved_note["type"] == "note"
+    assert saved_note["noteKind"] == "text"
+    assert saved_note["folderId"] in client.values["notes/folders"]
+
+
+def test_note_followup_and_checklist_use_visible_persisted_content() -> None:
+    client = FakeClient({"notes/folders": {"f1": {"name": "JARVIS", "isPrivate": False}}, "notes/notes": {}})
+    domains = BookShellDomains(client)
+    created = asyncio.run(domains.notes_write({
+        "action": "create", "title": "Prueba integración JARVIS", "content": "Primera línea",
+    }))
+    updated = asyncio.run(domains.notes_write({
+        "action": "update", "note_id": created["id"], "append_content": "Segunda línea",
+    }))
+    checklist = asyncio.run(domains.notes_write({
+        "action": "create", "title": "Checklist laboratorio",
+        "content": "- [ ] conectar ESP32\n- [ ] probar relé\n- [ ] revisar fuente",
+    }))
+    marked = asyncio.run(domains.notes_write({
+        "action": "update", "note_id": checklist["id"], "check_item": "probar relé",
+    }))
+    pending = asyncio.run(domains.notes_query({"query": "Checklist laboratorio", "pending_only": True}))
+    assert updated["verified"] is True
+    assert client.values["notes/notes"][created["id"]]["content"] == "Primera línea\nSegunda línea"
+    assert marked["verified"] is True
+    assert [item["item"] for item in pending["pendingItems"]] == ["conectar ESP32", "revisar fuente"]
 
 
 def test_cancel_reminder_requires_explicit_confirmation() -> None:

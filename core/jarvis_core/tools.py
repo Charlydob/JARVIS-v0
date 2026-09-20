@@ -67,7 +67,7 @@ class ToolRegistry:
         if not domains:
             return []
         aliases = {
-            "books": ("bookshell_books_", "bookshell_update_progress"),
+            "books": ("bookshell_books_", "bookshell_update_progress", "bookshell_create_book"),
             "gym": ("bookshell_gym_",), "habits": ("bookshell_habits_",),
             "finance": ("bookshell_finance_",), "reminder": ("bookshell_reminder", "bookshell_create_reminder"),
             "world": ("bookshell_world_",), "notes": ("bookshell_notes_",), "recipes": ("bookshell_recipes_",),

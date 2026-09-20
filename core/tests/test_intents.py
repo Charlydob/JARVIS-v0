@@ -81,6 +81,29 @@ def test_reminder_without_time_waits_and_delete_routes_to_search() -> None:
         now.date(), now,
     )
     assert multiple.arguments == {"queries": ["paquete de Apple", "está ese recordatorio creado o no"]}
+    named = route_direct_intent("Elimina el recordatorio que se llama que me llega el paquete de Apple", now.date(), now)
+    assert named.arguments == {"queries": ["que me llega el paquete de Apple"]}
+
+
+def test_book_note_and_checklist_writes_are_deterministic() -> None:
+    today = date(2026, 9, 20)
+    book = route_direct_intent(
+        "He comprado El extranjero de Albert Camus. Añádelo, página 0, todavía no lo he empezado.", today,
+    )
+    assert book.tool == "bookshell_create_book"
+    assert book.arguments == {"title": "El extranjero", "author": "Albert Camus", "current_page": 0, "status": "planned"}
+    note = route_direct_intent(
+        "Crea una nota titulada Prueba integración JARVIS con el contenido Primera línea", today,
+    )
+    assert note.tool == "bookshell_notes_write"
+    assert note.arguments["content"] == "Primera línea"
+    checklist = route_direct_intent(
+        "Crea una checklist llamada Checklist laboratorio con los puntos: conectar ESP32, probar relé, revisar fuente", today,
+    )
+    assert checklist.kind == "checklist_create"
+    assert checklist.arguments["content"].splitlines() == [
+        "- [ ] conectar ESP32", "- [ ] probar relé", "- [ ] revisar fuente",
+    ]
 
 
 def test_book_write_keeps_title_and_gym_write_wins_over_read() -> None:
