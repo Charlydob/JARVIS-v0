@@ -432,6 +432,61 @@ class BookShellDomains:
             **({"message": "La carpeta no aparece al volver a consultar BookShell."} if not verified else {}),
         }
 
+    async def notes_folder_delete(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        name = str(arguments.get("name") or "").strip()
+        if not name:
+            return {"deleted": False, "clarificationRequired": True, "message": "Falta el nombre de la carpeta."}
+        folders = await self.client.data("notes/folders") or {}
+        rows = [{"id": key, **value} for key, value in folders.items() if isinstance(value, dict)]
+        exact = [row for row in rows if _norm(row.get("name")) == _norm(name)]
+        if len(exact) > 1:
+            return {
+                "deleted": False, "clarificationRequired": True,
+                "message": "Hay varias carpetas con ese nombre; indique cuál quiere eliminar, señor.",
+                "candidates": [{"id": row.get("id"), "name": row.get("name")} for row in exact],
+            }
+        matched, ambiguous = (exact[0], []) if len(exact) == 1 else _match(name, rows)
+        if ambiguous:
+            return {
+                "deleted": False, "clarificationRequired": True,
+                "message": "Hay varias carpetas parecidas; indique cuál quiere eliminar, señor.",
+                "candidates": [{"id": row.get("id"), "name": row.get("name")} for row in ambiguous],
+            }
+        if not matched:
+            return {"deleted": False, "verified": False, "message": "No encuentro esa carpeta, señor."}
+        folder_id = str(matched["id"])
+        notes = await self.client.data("notes/notes") or {}
+        note_count = sum(
+            1 for value in notes.values()
+            if isinstance(value, dict) and str(value.get("folderId") or "") == folder_id
+        )
+        subfolder_count = sum(
+            1 for key, value in folders.items()
+            if key != folder_id and isinstance(value, dict) and str(value.get("parentId") or "") == folder_id
+        )
+        if note_count or subfolder_count:
+            return {
+                "deleted": False, "confirmationRequired": True, "folder": matched,
+                "noteCount": note_count, "subfolderCount": subfolder_count,
+                "message": (
+                    f"La carpeta {matched.get('name') or name} no está vacía "
+                    f"({note_count} notas y {subfolder_count} subcarpetas). "
+                    "No la eliminaré en cascada; confirme primero cómo quiere vaciarla, señor."
+                ),
+            }
+        write_started = time.perf_counter()
+        await self.client.delete_data(f"notes/folders/{folder_id}")
+        write_ms = (time.perf_counter() - write_started) * 1000
+        readback_started = time.perf_counter()
+        persisted = await self.client.data("notes/folders") or {}
+        readback_ms = (time.perf_counter() - readback_started) * 1000
+        verified = folder_id not in persisted
+        return {
+            "deleted": verified, "verified": verified, "id": folder_id, "folder": matched,
+            "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)},
+            **({"message": "La carpeta sigue apareciendo al volver a consultar BookShell."} if not verified else {}),
+        }
+
     async def notes_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
         notes = await self.client.data("notes/notes") or {}
         rows = [{"id": key, **value} for key, value in notes.items() if isinstance(value, dict)]
@@ -450,6 +505,42 @@ class BookShellDomains:
             result["pendingItems"] = pending
             result["count"] = len(pending)
         return result
+
+    async def notes_delete(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        title = str(arguments.get("title") or "").strip()
+        if not title:
+            return {"deleted": False, "clarificationRequired": True, "message": "Falta el título de la nota."}
+        notes = await self.client.data("notes/notes") or {}
+        rows = [{"id": key, **value} for key, value in notes.items() if isinstance(value, dict)]
+        exact = [row for row in rows if _norm(row.get("title")) == _norm(title)]
+        if len(exact) > 1:
+            return {
+                "deleted": False, "clarificationRequired": True,
+                "message": "Hay varias notas con ese título; indique cuál quiere eliminar, señor.",
+                "candidates": [{"id": row.get("id"), "title": row.get("title")} for row in exact],
+            }
+        matched, ambiguous = (exact[0], []) if len(exact) == 1 else _match(title, rows, "title")
+        if ambiguous:
+            return {
+                "deleted": False, "clarificationRequired": True,
+                "message": "Hay varias notas parecidas; indique cuál quiere eliminar, señor.",
+                "candidates": [{"id": row.get("id"), "title": row.get("title")} for row in ambiguous],
+            }
+        if not matched:
+            return {"deleted": False, "verified": False, "message": "No encuentro esa nota, señor."}
+        note_id = str(matched["id"])
+        write_started = time.perf_counter()
+        await self.client.delete_data(f"notes/notes/{note_id}")
+        write_ms = (time.perf_counter() - write_started) * 1000
+        readback_started = time.perf_counter()
+        persisted = await self.client.data("notes/notes") or {}
+        readback_ms = (time.perf_counter() - readback_started) * 1000
+        verified = note_id not in persisted
+        return {
+            "deleted": verified, "verified": verified, "id": note_id, "note": matched,
+            "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)},
+            **({"message": "La nota sigue apareciendo al volver a consultar BookShell."} if not verified else {}),
+        }
 
     async def notes_write(self, arguments: dict[str, Any]) -> dict[str, Any]:
         now = int(time.time() * 1000)
@@ -703,6 +794,8 @@ def register_domain_tools(registry: ToolRegistry, domains: BookShellDomains) -> 
     registry.register(Tool("bookshell_notes_query", "Busca notas o elementos pendientes de una checklist.", {"type": "object", "properties": {"query": {"type": "string"}, "pending_only": {"type": "boolean"}, "limit": {"type": "integer"}}}, domains.notes_query))
     registry.register(Tool("bookshell_notes_folder_query", "Busca carpetas de Notes por nombre.", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, domains.notes_folders_query))
     registry.register(Tool("bookshell_notes_folder_create", "Crea una carpeta de Notes si no existe y verifica su persistencia.", {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}, domains.notes_folder_write))
+    registry.register(Tool("bookshell_notes_folder_delete", "Elimina una carpeta de Notes solo si está vacía; nunca borra en cascada.", {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}, domains.notes_folder_delete))
+    registry.register(Tool("bookshell_notes_delete", "Localiza una nota por título, la elimina por UUID y verifica que desapareció.", {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]}, domains.notes_delete))
     registry.register(Tool("bookshell_notes_write", "Crea o actualiza una nota visible en BookShell; admite checklists Markdown persistentes y no elimina notas.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "note_id": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}, "append_content": {"type": "string"}, "check_item": {"type": "string"}, "category": {"type": "string"}, "folderId": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["action"]}, domains.notes_write))
     registry.register(Tool("bookshell_recipes_query", "Busca recetas y devuelve ingredientes, pasos y detalles reales.", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, domains.recipes_query))
     registry.register(Tool("bookshell_recipes_write", "Crea o actualiza una receta básica cuando ingredientes/pasos están claros; no elimina recetas.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "recipe_id": {"type": "string"}, "title": {"type": "string"}, "notes": {"type": "string"}, "meal": {"type": "string"}, "servings": {"type": "integer"}, "tags": {"type": "array", "items": {"type": "string"}}, "ingredients": {"type": "array", "items": {"type": "object"}}, "steps": {"type": "array", "items": {"type": "object"}}}, "required": ["action"]}, domains.recipes_write))

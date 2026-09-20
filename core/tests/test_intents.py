@@ -152,7 +152,9 @@ def test_natural_reminder_date_and_web_pages_do_not_collide_with_books() -> None
     assert reminder.arguments["target_date"] == "2027-04-12"
     assert reminder.missing_fields == ("time",)
     assert reminder.clarification == "¿A qué hora, señor?"
-    assert route_direct_intent("me gustaría que buscase su página de wikipedia", now.date(), now) is None
+    web = route_direct_intent("me gustaría que buscase su página de wikipedia", now.date(), now)
+    assert web is not None and web.tool == "web_search"
+    assert web.domain == "web"
     pc = route_direct_intent("abre https://es.wikipedia.org/ en el ordenador", now.date(), now)
     assert (pc.kind, pc.tool, pc.arguments["url"]) == ("pc_open_url", "pc_open_url", "https://es.wikipedia.org/")
 

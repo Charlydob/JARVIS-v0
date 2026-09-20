@@ -172,7 +172,7 @@ async def test_web_search_capability_is_reported_from_registry(tmp_path: Path) -
     result = await services.chat_stream({
         "message": "búscalo en Internet", "turn_id": "web-missing-1",
     }, collect)
-    assert result["message"] == "No tengo búsqueda web configurada actualmente, señor."
+    assert result["message"] == "La búsqueda web no está disponible ahora mismo, señor."
 
 
 @pytest.mark.asyncio
@@ -253,7 +253,7 @@ async def test_exact_folder_phrase_queries_then_creates_real_folder(tmp_path: Pa
         ("query", {"query": "mejora para Jarvis", "limit": 10}),
         ("create", {"name": "mejora para Jarvis"}),
     ]
-    assert result["message"] == "Carpeta disponible y verificada en BookShell, señor."
+    assert result["message"] == "La carpeta mejora para Jarvis se ha creado y verificado en BookShell, señor."
 
 
 @pytest.mark.asyncio
@@ -324,7 +324,7 @@ async def test_pc_url_capability_and_fast_turns_are_deterministic(tmp_path: Path
     opened_result = await services.chat_stream({"message": "abre https://es.wikipedia.org/ en el ordenador", "turn_id": "open-1"}, collect)
     wake = await services.chat_stream({"message": "JARVIS", "turn_id": "wake-1"}, collect)
     assert "puedo abrir URLs" in capability["message"] and "no tengo búsqueda web general" in capability["message"]
-    assert search["message"] == "No tengo búsqueda web configurada actualmente, señor."
+    assert search["message"] == "La búsqueda web no está disponible ahora mismo, señor."
     assert opened_result["message"] == "Fuente abierta en el navegador, señor."
     assert opened == ["https://es.wikipedia.org/"]
     assert wake["message"] == "A su servicio, señor."

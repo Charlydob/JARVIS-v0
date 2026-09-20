@@ -205,6 +205,37 @@ def _reminder_delete_queries(message: str) -> list[str]:
     return queries
 
 
+def _notes_name(value: str) -> str:
+    return re.sub(r"(?i)^\s*(?:de\s+)?", "", value).strip(" \t\r\n'\"¿?¡!,.-")
+
+
+def _web_query(message: str) -> tuple[str, bool] | None:
+    text = message.strip(" \t\r\n¿?¡!")
+    if not re.search(r"(?i)\b(?:b[uú]sc\w*|investig\w*|consult\w*)\b", text):
+        return None
+    if not re.search(r"(?i)\b(?:internet|web|wikipedia|p[aá]gina)\b", text) and re.search(
+        r"(?i)\b(?:nota|notas|carpeta|recordatorio|agenda|libro|bookshell|h[aá]bito|gasto|receta)\b", text,
+    ):
+        return None
+    open_result = bool(re.search(
+        r"(?i)\b(?:y\s+)?(?:[aá]brela|[aá]brelo|abre|abrir|mu[eé]strala)\b.*\b(?:ordenador|navegador|pc|computadora)\b",
+        text,
+    ))
+    cleaned = re.sub(
+        r"(?is)^.*?\b(?:b[uú]sc\w*|investig\w*|consult\w*)\b\s*",
+        "", text, count=1,
+    )
+    cleaned = re.sub(r"(?i)^en\s+(?:internet|la\s+web)\s+", "", cleaned)
+    cleaned = re.sub(
+        r"(?is)\s+(?:en\s+(?:internet|la\s+web)|y\s+(?:[aá]brela|[aá]brelo|abre|abrir|mu[eé]strala).*)$",
+        "", cleaned,
+    ).strip(" .")
+    cleaned = re.sub(r"(?i)^la\s+p[aá]gina\s+de\s+", "", cleaned)
+    if "wikipedia" in normalize(message) and "wikipedia" not in normalize(cleaned):
+        cleaned = f"Wikipedia {cleaned}"
+    return (cleaned or text, open_result)
+
+
 def route_direct_intent(message: str, today: date, now: datetime | None = None) -> DirectIntent | None:
     text = normalize(message)
     explicit_url = re.search(r"https?://[^\s)]+", message)
@@ -215,6 +246,16 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
             "pc_open_url", "pc_open_url", {"url": explicit_url.group(0).rstrip(".,;"), "title": "URL"},
             domain="pc", operation="open",
         )
+    web = _web_query(message)
+    if web:
+        query, open_result = web
+        arguments: dict[str, Any] = {"query": query, "max_results": 5, "topic": "general"}
+        if "wikipedia" in normalize(message):
+            arguments["include_domains"] = ["wikipedia.org"]
+        return DirectIntent(
+            "web_search_open" if open_result else "web_search", "web_search", arguments,
+            domain="web", operation="search_open" if open_result else "search",
+        )
     if re.search(r"\bcarpeta\s+y\s+notas?\b", text):
         return DirectIntent(
             "note_folder_create", clarification="¿Quiere crear una carpeta o una nota, señor?",
@@ -222,13 +263,54 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         )
     # Explicit Notes nouns take precedence over generic verbs such as "crea" or
     # "anota", which are also valid reminder verbs.
+    folder_delete = re.search(
+        r"(?is)\b(?:elimina|eliminar|borra|borrar)\s+(?:la\s+)?(?:sub)?carpeta(?:\s+de\s+notas)?(?:\s+(?:llamada|titulada))?\s+(.+)$",
+        message,
+    )
+    if folder_delete:
+        return DirectIntent("note_folder_delete", "bookshell_notes_folder_delete", {
+            "name": _notes_name(folder_delete.group(1)),
+        }, domain="notes", operation="delete")
+
+    note_delete = re.search(
+        r"(?is)\b(?:elimina|eliminar|borra|borrar)\s+(?:la\s+)?nota(?:\s+(?:llamada|titulada))?\s+(.+)$",
+        message,
+    )
+    if note_delete:
+        return DirectIntent("note_delete", "bookshell_notes_delete", {
+            "title": _notes_name(note_delete.group(1)),
+        }, domain="notes", operation="delete")
+
     folder_create = re.search(
-        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?(?:sub)?carpeta\s+(?:en|de)\s+notas(?:\s+(?:llamada|titulada))?\s+(.+)$",
+        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?(?:sub)?carpeta"
+        r"(?:\s+(?:en|de)\s+notas)?(?:\s+(?:que\s+se\s+llame|llamada|titulada|con\s+(?:el\s+)?nombre))?\s+(.+)$",
         message,
     )
     if folder_create:
         return DirectIntent("note_folder_create", "bookshell_notes_folder_create", {
-            "name": folder_create.group(1).strip(" ."),
+            "name": _notes_name(folder_create.group(1)),
+        }, domain="notes", operation="create")
+
+    note_in_folder_patterns = (
+        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?nota\s+en\s+(?:la\s+)?carpeta(?:\s+de)?\s+(.+?)\s+(?:llamada|titulada|con\s+(?:el\s+)?nombre)\s+(.+)$",
+        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?nota(?:\s+(?:llamada|titulada))?\s+(.+?)\s+en\s+(?:la\s+)?carpeta(?:\s+de)?\s+(.+)$",
+        r"(?is)\ben\s+(?:la\s+)?carpeta(?:\s+de)?\s+(.+?)\s+(?:crea|cree|crear)\s+(?:una\s+)?nota(?:\s+(?:llamada|titulada|con\s+(?:el\s+)?nombre))?\s+(.+)$",
+        r"(?is)\b(?:a[nñ]ade|agrega)\s+(.+?)\s+a\s+(?:la\s+)?carpeta(?:\s+de)?\s+(.+)$",
+        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?nota\s+con\s+(?:el\s+)?nombre\s+(.+?)\s+dentro\s+de\s+(?:la\s+)?(?:carpeta\s+)?(.+)$",
+        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?nota(?:\s+(?:llamada|titulada))?\s+(.+?)\s+en\s+(.+)$",
+        r"(?is)\ben\s+(.+?)\s+(?:crea|cree|crear)\s+(?:una\s+)?nota(?:\s+(?:llamada|titulada))?\s+(.+)$",
+    )
+    for index, pattern in enumerate(note_in_folder_patterns):
+        match = re.search(pattern, message)
+        if not match:
+            continue
+        if index in {0, 2, 6}:
+            folder_name, title = match.group(1), match.group(2)
+        else:
+            title, folder_name = match.group(1), match.group(2)
+        return DirectIntent("note_create_in_folder", "bookshell_notes_write", {
+            "action": "create", "title": _notes_name(title), "content": "",
+            "folder_name": _notes_name(folder_name),
         }, domain="notes", operation="create")
 
     checklist_create = re.search(
@@ -548,9 +630,17 @@ def render_direct_result(
         return str(result.get("message") or "BookShell no confirmó el estado del libro, señor.")
     if kind == "note_folder_create":
         if result.get("verified") and (result.get("created") or result.get("existing")):
-            return "Carpeta disponible y verificada en BookShell, señor."
+            folder = result.get("folder") or {}
+            name = folder.get("name") or (arguments or {}).get("name") or "solicitada"
+            if result.get("existing"):
+                return f"La carpeta {name} ya existe, señor."
+            return f"La carpeta {name} se ha creado y verificado en BookShell, señor."
         return str(result.get("message") or "BookShell no confirmó la carpeta, señor.")
-    if kind in {"note_create", "note_update", "checklist_create", "checklist_mark"}:
+    if kind == "note_delete":
+        return "Nota eliminada y verificada en BookShell, señor." if result.get("deleted") and result.get("verified") else str(result.get("message") or "BookShell no confirmó la eliminación, señor.")
+    if kind == "note_folder_delete":
+        return "Carpeta eliminada y verificada en BookShell, señor." if result.get("deleted") and result.get("verified") else str(result.get("message") or "BookShell no confirmó la eliminación, señor.")
+    if kind in {"note_create", "note_create_in_folder", "note_update", "checklist_create", "checklist_mark"}:
         succeeded = (result.get("created") or result.get("updated")) and result.get("verified")
         return "Hecho y verificado en BookShell, señor." if succeeded else str(result.get("message") or "BookShell no confirmó la nota, señor.")
     if kind == "note_open":
