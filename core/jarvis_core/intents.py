@@ -246,12 +246,37 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
             "pc_open_url", "pc_open_url", {"url": explicit_url.group(0).rstrip(".,;"), "title": "URL"},
             domain="pc", operation="open",
         )
+    weather_terms = r"\b(?:tiempo|clima|lluv\w*|temperatura|frio|calor|nubl\w*|pronostico|prevision)\b"
+    personal_data_terms = r"\b(?:nota|notas|carpeta|recordatorio|agenda|libro|bookshell|habito|gasto|receta)\b"
+    if re.search(weather_terms, text) and not (
+        re.search(personal_data_terms, text) and not re.search(r"\b(?:que|cual|hara|hace|va a)\b", text)
+    ):
+        scope = (
+            "tomorrow" if re.search(r"\bmanana\b", text)
+            else "week" if re.search(r"\b(?:esta|la)\s+semana\b", text)
+            else "today" if re.search(r"\b(?:hoy|esta tarde)\b", text)
+            else "current"
+        )
+        weather_arguments: dict[str, Any] = {"scope": scope}
+        if re.search(r"\besta tarde\b", text):
+            weather_arguments["period"] = "afternoon"
+        return DirectIntent(
+            "weather_forecast", "weather_forecast", weather_arguments,
+            domain="weather", operation="forecast",
+        )
+    if re.search(r"\b(?:donde estoy|donde estamos|mi ubicacion|mi localizacion)\b", text):
+        return DirectIntent(
+            "current_location", "location_reverse", {},
+            domain="location", operation="reverse_geocode",
+        )
     web = _web_query(message)
     if web:
         query, open_result = web
         arguments: dict[str, Any] = {"query": query, "max_results": 5, "topic": "general"}
         if "wikipedia" in normalize(message):
             arguments["include_domains"] = ["wikipedia.org"]
+        if re.search(r"\b(?:investiga\s+(?:bien|a fondo)|comprueba\s+varias\s+fuentes)\b", text):
+            arguments["research_mode"] = "focused"
         return DirectIntent(
             "web_search_open" if open_result else "web_search", "web_search", arguments,
             domain="web", operation="search_open" if open_result else "search",

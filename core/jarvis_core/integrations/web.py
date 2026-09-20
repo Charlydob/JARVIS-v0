@@ -1,5 +1,8 @@
 import logging
+import re
+import unicodedata
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -8,6 +11,26 @@ from jarvis_core.tools import Tool, ToolRegistry
 
 
 LOGGER = logging.getLogger("jarvis-core.web")
+
+
+def _normalized(value: str) -> str:
+    return unicodedata.normalize("NFKD", value.casefold()).encode("ascii", "ignore").decode()
+
+
+def _quality_score(item: dict[str, Any], query: str) -> float:
+    domain = str(item.get("domain") or "")
+    haystack = _normalized(f"{item.get('title', '')} {item.get('content', '')} {domain}")
+    query_tokens = {token for token in re.findall(r"[a-z0-9]+", _normalized(query)) if len(token) > 2}
+    overlap = sum(1 for token in query_tokens if token in haystack)
+    trusted_bonus = 0.0
+    if domain.endswith((".edu", ".gov", ".org")):
+        trusted_bonus += 0.08
+    if any(name in domain for name in ("digikey.", "mouser.", "adafruit.", "sparkfun.", "docs.", "wikipedia.org")):
+        trusted_bonus += 0.1
+    if any(term in haystack for term in ("datasheet", "data sheet", "technical documentation", "documentacion tecnica")):
+        trusted_bonus += 0.08
+    provider_score = item.get("score") if isinstance(item.get("score"), (int, float)) else 0.0
+    return float(provider_score) + min(overlap, 5) * 0.03 + trusted_bonus
 
 
 class TavilySearch:
@@ -60,13 +83,16 @@ class TavilySearch:
         for item in data.get("results") or []:
             if not isinstance(item, dict) or not item.get("url"):
                 continue
+            url = str(item["url"])
             results.append({
                 "title": str(item.get("title") or item["url"])[:300],
-                "url": str(item["url"]),
+                "url": url,
                 "content": str(item.get("content") or "")[:1600],
                 "score": item.get("score"),
                 "published_date": item.get("published_date"),
+                "domain": urlsplit(url).netloc.casefold().removeprefix("www."),
             })
+        results.sort(key=lambda item: _quality_score(item, query), reverse=True)
         return {
             "available": True, "provider": "tavily", "query": query,
             "results": results, "count": len(results), "response_time": data.get("response_time"),

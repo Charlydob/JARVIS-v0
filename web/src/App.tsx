@@ -21,6 +21,8 @@ import { takeSpeechSegments } from './speech'
 import { PrefetchedSpeechQueue } from './speechQueue'
 import { parseSpeechInterrupt } from './speechInterrupt'
 import { copyPlainText, formatHistorySelection } from './historyExport'
+import { DeviceLocationError, getFreshLocation, requiresFreshLocation } from './deviceLocation'
+import { parseVoiceFeedback } from './voiceFeedback'
 
 type View = 'face' | 'dashboard'
 
@@ -172,14 +174,6 @@ export default function App() {
     return [...groups.values()]
   }, [history])
 
-  useEffect(() => {
-    navigator.geolocation?.getCurrentPosition(
-      ({ coords }) => setLocation({ latitude: coords.latitude, longitude: coords.longitude }),
-      () => undefined,
-      { enableHighAccuracy: false, maximumAge: 15 * 60 * 1000, timeout: 8000 }
-    )
-  }, [])
-
   const refreshHistory = useCallback(async () => {
     if (!coreOnline) return
     setHistoryLoading(true)
@@ -266,6 +260,19 @@ export default function App() {
     const cleanMessage = message.trim()
     if (!cleanMessage || !coreOnline) return
     if (activeTurnRef.current) return
+    let requestLocation = location
+    if (requiresFreshLocation(cleanMessage)) {
+      try {
+        requestLocation = await getFreshLocation()
+        setLocation(requestLocation)
+      } catch (error) {
+        setNotice(error instanceof DeviceLocationError
+          ? error.message
+          : 'No he podido obtener la ubicación ahora mismo. Puede volver a intentarlo, señor.')
+        dispatch({ type: 'EMPTY_AUDIO' })
+        return
+      }
+    }
     const turnId = requestedTurnId || crypto.randomUUID()
     const speechEpoch = speechEpochRef.current + 1
     speechEpochRef.current = speechEpoch
@@ -295,7 +302,7 @@ export default function App() {
         for (const segment of split.segments) speechQueue.enqueue(segment)
       }
 
-      const response = await streamMessage(cleanMessage, conversationId.current, location, language, languageConfidence, turnId, (chunk) => {
+      const response = await streamMessage(cleanMessage, conversationId.current, requestLocation, language, languageConfidence, turnId, (chunk) => {
         if (speechEpoch !== speechEpochRef.current) return
         fullText += chunk
         setNotice(cleanAssistantText(fullText))
@@ -389,6 +396,30 @@ export default function App() {
         return
       }
       recentTranscriptRef.current = { text: normalized, at: Date.now() }
+      const feedback = parseVoiceFeedback(transcription.transcript)
+      if (feedback) {
+        if (!latestResponse) {
+          setNotice('No hay una respuesta anterior de JARVIS que pueda valorar, señor.')
+          dispatch({ type: 'EMPTY_AUDIO' })
+          return
+        }
+        await sendFeedback(latestResponse.id, feedback.rating, {
+          reasonCode: feedback.reasonCode,
+          comment: feedback.comment,
+          expectedBehavior: feedback.expectedBehavior,
+        })
+        setLatestResponse({ id: latestResponse.id, rating: feedback.rating })
+        setNotice(feedback.rating === 'good' ? 'Gracias, señor.' : 'Corrección guardada, señor.')
+        await refreshHistory()
+        dispatch({ type: 'EMPTY_AUDIO' })
+        if (feedback.followUpMessage) {
+          void runConversation(
+            feedback.followUpMessage, transcription.language, transcription.languageConfidence,
+            crypto.randomUUID(),
+          )
+        }
+        return
+      }
       void runConversation(
         transcription.transcript, transcription.language, transcription.languageConfidence,
         crypto.randomUUID(),
@@ -400,7 +431,7 @@ export default function App() {
     } finally {
       processingAudioRef.current = false
     }
-  }, [runConversation])
+  }, [latestResponse, refreshHistory, runConversation])
 
   const processInterruptAudio = useCallback(async (
     audio: Blob, metadata: AudioCaptureMetadata,
