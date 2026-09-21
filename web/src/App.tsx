@@ -270,6 +270,7 @@ export default function App() {
 
   const runConversation = useCallback(async (
     message: string, language?: string, languageConfidence?: number, requestedTurnId?: string,
+    transcriptionQuality?: 'ACCEPT' | 'LOW_CONFIDENCE' | 'REJECT',
   ) => {
     const cleanMessage = message.trim()
     if (!cleanMessage || !coreOnline) return
@@ -329,7 +330,7 @@ export default function App() {
           speechBuffer += chunk
           queueSpeech()
         }
-      })
+      }, transcriptionQuality)
       if (speechEpoch !== speechEpochRef.current) return
       conversationId.current = response.conversation_id
       sessionLanguage.current = response.language || sessionLanguage.current
@@ -438,7 +439,7 @@ export default function App() {
       }
       void runConversation(
         transcription.transcript, transcription.language, transcription.languageConfidence,
-        crypto.randomUUID(),
+        crypto.randomUUID(), transcription.qualityState,
       )
     } catch (error) {
       console.warn('No se pudo transcribir la grabación', error)

@@ -28,8 +28,10 @@ from jarvis_core.intents import (
     parse_entity_name, render_direct_result, repair_direct_intent, route_direct_intent,
 )
 from jarvis_core.language import SessionLanguagePolicy, response_language
+from jarvis_core.semantic import Intent, PendingPlan, PlanValidator, SemanticPlanner, merge_pending, to_direct_intent
 from jarvis_core.storage import Storage
 from jarvis_core.tools import ToolRegistry
+from jarvis_core.transcription_quality import QualityDecision, TranscriptionQualityGate, likely_own_tts
 
 
 SYSTEM_PROMPT = """Eres JARVIS, un asistente personal preciso, discreto y útil.
@@ -272,6 +274,25 @@ class OllamaService:
         except httpx.HTTPError:
             return False
 
+    async def semantic_plan(self, request: dict[str, Any]) -> dict[str, Any]:
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": str(request["system"])},
+                {"role": "user", "content": json.dumps(request["input"], ensure_ascii=False)},
+            ],
+            "format": request["schema"],
+            "stream": False,
+            "keep_alive": "10m",
+            "options": {"temperature": 0, "num_predict": 700},
+        }
+        started = time.perf_counter()
+        async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=1.0)) as client:
+            response = await client.post(f"{self.base_url}/api/chat", json=payload)
+            response.raise_for_status()
+        PERFORMANCE_LOGGER.info("stage=planner_total duration_ms=%.1f", (time.perf_counter() - started) * 1000)
+        return json.loads(str(response.json().get("message", {}).get("content", "{}")))
+
     async def warm(self) -> None:
         started = time.perf_counter()
         payload = {
@@ -449,6 +470,9 @@ class JarvisServices:
         self.storage = Storage(settings.database_path)
         self.ollama = OllamaService(settings)
         self.stt = SpeechToTextService(settings)
+        self.transcription_quality = TranscriptionQualityGate()
+        self.semantic_planner = SemanticPlanner(self.ollama.semantic_plan)
+        self.plan_validator = PlanValidator()
         self.tts = TextToSpeechService(settings)
         self.tools = ToolRegistry()
         self.tools.load_modules(settings.tool_modules)
@@ -464,6 +488,7 @@ class JarvisServices:
         self._turn_results: dict[str, tuple[dict[str, Any], float]] = {}
         self._turn_inflight: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._pending_intents: dict[str, PendingAction] = {}
+        self._pending_plans: dict[str, PendingPlan] = {}
         self._pending_entity_choices: dict[str, PendingEntityChoice] = {}
         self._recent_query_intents: dict[str, tuple[DirectIntent, float]] = {}
         self._recent_notes: dict[str, tuple[dict[str, Any], float]] = {}
@@ -471,6 +496,7 @@ class JarvisServices:
         self._pending_web_entities: dict[str, tuple[str, list[dict[str, Any]], str, float]] = {}
         self._action_locks: dict[str, asyncio.Lock] = {}
         self._action_results: dict[str, str] = {}
+        self._recent_tts: tuple[str, float] | None = None
 
     async def status(self) -> dict[str, Any]:
         return {
@@ -525,6 +551,7 @@ class JarvisServices:
                 return result
             transcript, language, metadata = await self.stt.transcribe(raw, content_type)
             transcript = collapse_repeated_phrases(transcript)
+            quality = self.transcription_quality.assess(transcript, metadata)
             LOGGER.info(
                 "utterance_id=%s audio_format=%s codec=%s sample_rate=%s channels=%s container_duration_s=%s "
                 "detected_language=%s language_probability=%s decoded_s=%s after_vad_s=%s segment_count=%s "
@@ -552,6 +579,10 @@ class JarvisServices:
                 discard_reason = "noise_transcript"
             elif previous and previous[0] == normalized and now - previous[1] <= TRANSCRIPT_REPEAT_WINDOW_S:
                 discard_reason = "duplicate_transcript"
+            elif quality.decision == QualityDecision.REJECT:
+                discard_reason = "transcription_quality_rejected"
+            elif self._recent_tts and now - self._recent_tts[1] <= 12 and likely_own_tts(transcript, self._recent_tts[0]):
+                discard_reason = "own_tts_echo"
             if discard_reason:
                 transcript = ""
             else:
@@ -563,6 +594,8 @@ class JarvisServices:
                 "language_confidence": metadata["language_probability"],
                 "provider": "faster-whisper", "detail": "discarded" if discard_reason else "complete",
                 "discard_reason": discard_reason, "utterance_id": utterance_id,
+                "quality_state": quality.decision.value, "quality_score": quality.score,
+                "quality_reasons": list(quality.reasons),
             }
             self._audio_results[utterance_id] = result
             if len(self._audio_results) > 200:
@@ -571,6 +604,7 @@ class JarvisServices:
         if action == "tts":
             started = time.perf_counter()
             raw = await self.tts.synthesize(str(payload["text"]), payload.get("language"))
+            self._recent_tts = (str(payload["text"]), time.monotonic())
             duration_ms = (time.perf_counter() - started) * 1000
             PERFORMANCE_LOGGER.info("turn_id=%s stage=tts_first_audio duration_ms=%.1f", payload.get("turn_id"), duration_ms)
             PERFORMANCE_LOGGER.info("turn_id=%s stage=tts_total duration_ms=%.1f", payload.get("turn_id"), duration_ms)
@@ -668,10 +702,49 @@ class JarvisServices:
             self._pending_entity_choices.pop(conversation_id, None)
             pending_choice = None
         choice_direct = self._pending_entity_followup(conversation_id, message) if pending_choice else None
-        direct = choice_direct or (
-            repair_direct_intent(repair_source, message, today, local_now)
-            if repair_source else route_direct_intent(routing_message, today, local_now)
-        )
+        direct = None
+        semantic_planned = False
+        semantic_conversation = False
+        semantic_pending = self._pending_plans.get(conversation_id)
+        if semantic_pending and semantic_pending.expired(PENDING_ACTION_TIMEOUT_S):
+            self._pending_plans.pop(conversation_id, None)
+            semantic_pending = None
+        if self.settings.semantic_planner_enabled and choice_direct is None:
+            try:
+                recent = [
+                    {"role": str(item.get("role", "")), "content": str(item.get("content", ""))}
+                    for item in previous[-4:]
+                ]
+                planner_started = time.perf_counter()
+                semantic = await self.semantic_planner.plan(
+                    message, pending=semantic_pending, recent=recent,
+                )
+                semantic_planned = True
+                semantic_conversation = semantic.intent == Intent.CONVERSATION
+                if semantic_pending and semantic.continuation:
+                    semantic = merge_pending(semantic_pending, semantic)
+                validation = self.plan_validator.validate(semantic, today)
+                direct = to_direct_intent(validation)
+                if validation.missing_fields:
+                    self._pending_plans[conversation_id] = PendingPlan(
+                        semantic, validation.missing_fields, turn_id,
+                    )
+                elif validation.execution is not None:
+                    self._pending_plans.pop(conversation_id, None)
+                PERFORMANCE_LOGGER.info(
+                    "turn_id=%s stage=planner_first_result duration_ms=%.1f intent=%s confidence=%.3f",
+                    turn_id, (time.perf_counter() - planner_started) * 1000,
+                    semantic.intent.value, semantic.confidence,
+                )
+            except (httpx.HTTPError, json.JSONDecodeError, ValueError):
+                TOOL_LOGGER.exception("turn_id=%s semantic_planner_failed=true fallback=legacy_router", turn_id)
+        if choice_direct is not None:
+            direct = choice_direct
+        elif not semantic_planned:
+            direct = (
+                repair_direct_intent(repair_source, message, today, local_now)
+                if repair_source else route_direct_intent(routing_message, today, local_now)
+            )
         pending_web = self._pending_web_entities.get(conversation_id)
         if pending_web and time.monotonic() - pending_web[3] <= 300 and re.fullmatch(
             r"\s*(?:si|sí|correcto|eso es|a eso)\s*[.!]?\s*", message, flags=re.IGNORECASE,
@@ -825,6 +898,14 @@ class JarvisServices:
             )
             pending = None
         routed = direct
+        if (
+            payload.get("transcription_quality") == QualityDecision.LOW_CONFIDENCE.value
+            and direct is not None and direct.operation in {"create", "update", "delete", "open"}
+        ):
+            direct = DirectIntent(
+                "stt_confirmation", clarification=f"He entendido: «{message}». ¿Es correcto, señor?",
+                domain=direct.domain, operation=direct.operation, missing_fields=("stt_confirmation",),
+            )
         if routed and routed.domain:
             routed_arguments = routed.arguments or {}
             date_range = routed_arguments.get("scope") or (
@@ -1194,7 +1275,7 @@ class JarvisServices:
         # made unrelated short transcripts such as "suscríbete" execute the
         # previous tool again.
         routing_message = repair_source or message
-        definitions = self.tools.definitions_for(routing_message)
+        definitions = [] if semantic_conversation else self.tools.definitions_for(routing_message)
         PERFORMANCE_LOGGER.info("turn_id=%s stage=tool_schema_selection duration_ms=%.1f tools=%d", turn_id, (time.perf_counter() - routing_started) * 1000, len(definitions))
         if definitions:
             direct_query = self.tools.direct_query(routing_message)

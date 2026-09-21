@@ -42,6 +42,7 @@ let pendingMicrophone: Promise<MediaStream> | undefined
 let getUserMediaCallCount = 0
 const activeRecorderSessions = new Set<string>()
 let interruptCooldownUntil = 0
+let lastTtsAudioEndTimestamp = 0
 
 type AudioSessionNavigator = Navigator & { audioSession?: { type: string } }
 
@@ -71,9 +72,13 @@ export function beginSpeechPlayback(): () => void {
   const audioSessionSupported = setAudioSession('play-and-record')
   console.info('[JARVIS audio session]', { mode: 'speaking_with_interrupt_listener', audio_session_supported: audioSessionSupported })
   return () => {
+    lastTtsAudioEndTimestamp = performance.now()
     setAudioSession('play-and-record')
     setMicrophoneTracksEnabled(true)
-    console.info('[JARVIS audio session]', { mode: 'play-and-record', audio_session_supported: audioSessionSupported })
+    console.info('[JARVIS audio session]', {
+      mode: 'play-and-record', audio_session_supported: audioSessionSupported,
+      tts_audio_end_timestamp: lastTtsAudioEndTimestamp,
+    })
   }
 }
 
@@ -153,6 +158,7 @@ export function useContinuousVoice({ enabled, paused, conversationState, onListe
     let finalizingUtteranceId: string | undefined
     let lastCaptureIgnoredReason = ''
     let captureMode: 'normal' | 'interrupt' = 'normal'
+    let firstAudioFrameLogged = false
 
     const log = (event: string, fields: Record<string, unknown> = {}) => {
       console.info('[JARVIS voice]', {
@@ -246,8 +252,14 @@ export function useContinuousVoice({ enabled, paused, conversationState, onListe
       resetMetrics()
       activeRecorderSessions.add(recorderSessionId)
       recorder.start(250)
+      const listenerArmedTimestamp = performance.now()
+      firstAudioFrameLogged = false
       lastCaptureIgnoredReason = ''
-      log('recording_started')
+      log('recording_started', {
+        listener_armed_timestamp: listenerArmedTimestamp,
+        tts_end_to_listener_armed_ms: lastTtsAudioEndTimestamp
+          ? Number((listenerArmedTimestamp - lastTtsAudioEndTimestamp).toFixed(1)) : undefined,
+      })
       if (captureMode === 'normal') callbacks.current.onListening()
       recordingWatchdog = window.setTimeout(() => {
         stopRecording(heardVoice, captureMode === 'interrupt' ? 'interrupt_segment_limit' : heardVoice ? 'max_recording_duration' : 'max_recording_without_voice')
@@ -271,6 +283,10 @@ export function useContinuousVoice({ enabled, paused, conversationState, onListe
       } else if (desiredMode && machine.phase === 'IDLE') {
         startRecording(desiredMode)
       } else if (machine.phase === 'LISTENING' && recorder?.state === 'recording' && analyser && samples) {
+        if (!firstAudioFrameLogged) {
+          firstAudioFrameLogged = true
+          log('first_audio_frame', { first_audio_frame_timestamp: performance.now() })
+        }
         analyser.getByteTimeDomainData(samples)
         let energy = 0
         for (const sample of samples) {
@@ -292,7 +308,7 @@ export function useContinuousVoice({ enabled, paused, conversationState, onListe
             heardVoice = true
             speechStartedAt = now
             lastVoiceAt = now
-            log('speech_detected', { rms: Number(rms.toFixed(4)) })
+            log('speech_detected', { rms: Number(rms.toFixed(4)), vad_speech_start_timestamp: now })
             speechWatchdog = window.setTimeout(() => {
               stopRecording(true, 'speech_duration_watchdog')
             }, captureMode === 'interrupt' ? MAX_INTERRUPT_SPEECH_MS : MAX_SPEECH_UTTERANCE_MS)

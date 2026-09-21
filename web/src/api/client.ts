@@ -102,12 +102,13 @@ export async function streamMessage(
   language: string | undefined,
   languageConfidence: number | undefined,
   turnId: string,
-  onChunk: (chunk: string) => void
+  onChunk: (chunk: string) => void,
+  transcriptionQuality?: 'ACCEPT' | 'LOW_CONFIDENCE' | 'REJECT',
 ): Promise<ChatResponse> {
   const response = await checked(await timedFetch(`${apiUrl}/api/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, conversation_id: conversationId, turn_id: turnId, ...location, language, language_confidence: languageConfidence })
+    body: JSON.stringify({ message, conversation_id: conversationId, turn_id: turnId, ...location, language, language_confidence: languageConfidence, transcription_quality: transcriptionQuality })
   }, 180_000))
   if (!response.body) throw new Error('El navegador no admite respuestas en streaming.')
 
@@ -142,7 +143,7 @@ export async function streamMessage(
   return result
 }
 
-export async function transcribeAudio(audio: Blob, metadata: AudioCaptureMetadata, utteranceId: string, conversationId?: string): Promise<{ transcript: string; language?: string; languageConfidence?: number; discardReason?: string; utteranceId?: string }> {
+export async function transcribeAudio(audio: Blob, metadata: AudioCaptureMetadata, utteranceId: string, conversationId?: string): Promise<{ transcript: string; language?: string; languageConfidence?: number; discardReason?: string; utteranceId?: string; qualityState?: 'ACCEPT' | 'LOW_CONFIDENCE' | 'REJECT'; qualityScore?: number; qualityReasons?: string[] }> {
   const form = new FormData()
   const extension = audio.type.includes('mp4') || audio.type.includes('m4a') || audio.type.includes('aac')
     ? 'm4a'
@@ -155,8 +156,8 @@ export async function transcribeAudio(audio: Blob, metadata: AudioCaptureMetadat
   form.append('manual_finalize', String(Boolean(metadata.manualFinalize)))
   if (conversationId) form.append('conversation_id', conversationId)
   const response = await checked(await timedFetch(`${apiUrl}/api/audio`, { method: 'POST', body: form }))
-  const body = await response.json() as { transcript: string; language?: string; language_confidence?: number; discard_reason?: string; utterance_id?: string }
-  return { transcript: body.transcript.trim(), language: body.language, languageConfidence: body.language_confidence, discardReason: body.discard_reason, utteranceId: body.utterance_id }
+  const body = await response.json() as { transcript: string; language?: string; language_confidence?: number; discard_reason?: string; utterance_id?: string; quality_state?: 'ACCEPT' | 'LOW_CONFIDENCE' | 'REJECT'; quality_score?: number; quality_reasons?: string[] }
+  return { transcript: body.transcript.trim(), language: body.language, languageConfidence: body.language_confidence, discardReason: body.discard_reason, utteranceId: body.utterance_id, qualityState: body.quality_state, qualityScore: body.quality_score, qualityReasons: body.quality_reasons }
 }
 
 export async function synthesizeSpeech(text: string, language?: string, turnId?: string): Promise<Blob> {

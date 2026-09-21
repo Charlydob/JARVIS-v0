@@ -30,10 +30,14 @@ class CoreSettings(BaseSettings):
     core_token: str = "development-only-change-me"
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "llama3.1:8b"
+    semantic_planner_enabled: bool = True
+    semantic_planner_min_confidence: float = 0.70
+    stt_engine: str = "faster-whisper"
     whisper_model: str = "small"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
     whisper_language: str = "es"
+    stt_corpus_capture_limit: int = 0
     tts_voice: str = "es-ES-AlvaroNeural"
     bookshell_api_url: str = "https://api-bookshell.charlydob.com"
     bookshell_api_token: str = ""
