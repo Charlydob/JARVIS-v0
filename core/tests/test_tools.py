@@ -39,8 +39,9 @@ def test_registry_sanitizes_nulls_and_rejects_non_json_arrays() -> None:
         "title": "Prueba", "content": "null", "folderId": "None", "tags": '["uno", "dos"]',
     }))
     assert captured == {"title": "Prueba", "tags": ["uno", "dos"]}
-    with pytest.raises(ValueError, match="must be a JSON array"):
-        asyncio.run(registry.execute("notes", {"title": "Prueba", "tags": "['uno', 'dos']"}))
+    captured.clear()
+    asyncio.run(registry.execute("notes", {"title": "Prueba", "tags": "['uno', 'dos']"}))
+    assert captured == {"title": "Prueba", "tags": ["uno", "dos"]}
 
 
 def test_registry_rejects_duplicate_names() -> None:

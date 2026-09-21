@@ -20,6 +20,19 @@ def normalize(value: str) -> str:
     return unicodedata.normalize("NFKD", value.casefold()).encode("ascii", "ignore").decode()
 
 
+def parse_entity_name(value: str) -> str:
+    """Strip syntactic naming wrappers without rewriting the entity itself."""
+    cleaned = value.strip(" \t\r\n'\"¿?¡!,.;:-")
+    cleaned = re.sub(
+        r"(?is)^\s*(?:que\s+se\s+llame|llamad[oa]|con\s+(?:el\s+)?nombre|de\s+nombre)\s+",
+        "", cleaned,
+    )
+    cleaned = re.sub(r"(?is)^\s*jarvis\s*[,;:-]?\s*", "", cleaned)
+    if re.search(r"(?is)(?:^|\s)jarvis\s*$", cleaned) and not re.search(r"(?is)\bpara\s+jarvis\s*$", cleaned):
+        cleaned = re.sub(r"(?is)\s*[,;:-]?\s+jarvis\s*$", "", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip(" \t\r\n'\"¿?¡!,.;:-")
+
+
 def _next_weekday(today: date, weekday: int) -> str:
     days = (weekday - today.weekday()) % 7
     return (today + timedelta(days=days or 7)).isoformat()
@@ -163,9 +176,12 @@ def _temporal_scope(text: str) -> str | None:
 
 
 def _reminder_title(message: str) -> str:
-    named = re.search(r"(?is)\b(?:que\s+se\s+llame|llamad[oa]|titulad[oa])\s+(.+)$", message)
+    named = re.search(
+        r"(?is)\b(?:que\s+se\s+llame|llamad[oa]|titulad[oa]|con\s+(?:el\s+)?nombre|de\s+nombre)\s+(.+)$",
+        message,
+    )
     if named:
-        return named.group(1).strip(" ¿?¡!,.-") or "Recordatorio"
+        return parse_entity_name(named.group(1)) or "Recordatorio"
     title = re.sub(rf"(?is)^.*?\b{CREATE_PATTERN}\b", "", message, count=1).strip()
     title = re.sub(r"(?i)^\s*(?:como\s+)?(?:un\s+)?recordatorio(?:\s+para)?\s*", "", title)
     title = re.sub(r"(?i)\b(?:hoy|mañana|este\s+|el\s+)?(?:lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b", " ", title)
@@ -181,7 +197,7 @@ def _reminder_title(message: str) -> str:
 
 def _reminder_query(text: str) -> str:
     query = re.sub(
-        r"\b(?:jarvis|que|tengo|tiene|algo|para|hoy|manana|esta|este|la|el|de|semana|proxima|siguiente|viene|lunes|martes|miercoles|jueves|viernes|sabado|domingo|recordatori[oa]s?|hay|cuando|guardia)\b",
+        r"\b(?:jarvis|oye|eh|mira|escucha|dime|por\s+favor|creo\s+que|tengo\s+algo|que|tengo|tiene|algo|para|hoy|manana|esta|este|la|el|de|semana|proxima|siguiente|viene|lunes|martes|miercoles|jueves|viernes|sabado|domingo|recordatori[oa]s?|hay|cuando|guardia)\b",
         " ", text,
     )
     return re.sub(r"\s+", " ", query).strip(" ¿?¡!,.-")
@@ -206,7 +222,17 @@ def _reminder_delete_queries(message: str) -> list[str]:
 
 
 def _notes_name(value: str) -> str:
-    return re.sub(r"(?i)^\s*(?:de\s+)?", "", value).strip(" \t\r\n'\"¿?¡!,.-")
+    return parse_entity_name(re.sub(r"(?i)^\s*(?:de\s+)?", "", value))
+
+
+def checklist_item_incomplete(value: str) -> bool:
+    text = normalize(value).strip(" .,!?:;")
+    if not text:
+        return True
+    return bool(re.fullmatch(
+        r"(?:que\s+)?(?:pueda(?:\s+hacer)?|sea\s+capaz\s+de|para|y|o|pero|ni)",
+        text,
+    ))
 
 
 def _web_query(message: str) -> tuple[str, bool] | None:
@@ -218,7 +244,7 @@ def _web_query(message: str) -> tuple[str, bool] | None:
     ):
         return None
     open_result = bool(re.search(
-        r"(?i)\b(?:y\s+)?(?:[aá]brela|[aá]brelo|abre|abrir|mu[eé]strala)\b.*\b(?:ordenador|navegador|pc|computadora)\b",
+        r"(?i)\b(?:y\s+)?(?:[aá]brela|[aá]brelo|abre|abrir)\b(?:.*\b(?:ordenador|navegador|pc|computadora)\b|\s*[.!]?\s*$)",
         text,
     ))
     cleaned = re.sub(
@@ -227,7 +253,7 @@ def _web_query(message: str) -> tuple[str, bool] | None:
     )
     cleaned = re.sub(r"(?i)^en\s+(?:internet|la\s+web)\s+", "", cleaned)
     cleaned = re.sub(
-        r"(?is)\s+(?:en\s+(?:internet|la\s+web)|y\s+(?:[aá]brela|[aá]brelo|abre|abrir|mu[eé]strala).*)$",
+        r"(?is)\s+(?:en\s+(?:internet|la\s+web)|y\s+(?:[aá]brela|[aá]brelo|abre|abrir|mu[eé]strala|mu[eé]strame\s+las\s+fuentes).*)$",
         "", cleaned,
     ).strip(" .")
     cleaned = re.sub(r"(?i)^la\s+p[aá]gina\s+de\s+", "", cleaned)
@@ -277,10 +303,13 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
             arguments["include_domains"] = ["wikipedia.org"]
         if re.search(r"\b(?:investiga\s+(?:bien|a fondo)|comprueba\s+varias\s+fuentes)\b", text):
             arguments["research_mode"] = "focused"
-        return DirectIntent(
-            "web_search_open" if open_result else "web_search", "web_search", arguments,
-            domain="web", operation="search_open" if open_result else "search",
-        )
+        show_sources = bool(re.search(
+            r"\b(?:muestrame|ensename|quiero\s+ver)\s+(?:las\s+)?fuentes(?:\s+en\s+pantalla)?\b",
+            text,
+        ))
+        kind = "web_search_open" if open_result else "web_search_show_sources" if show_sources else "web_search"
+        operation = "search_open" if open_result else "search_show_sources" if show_sources else "search"
+        return DirectIntent(kind, "web_search", arguments, domain="web", operation=operation)
     if re.search(r"\bcarpeta\s+y\s+notas?\b", text):
         return DirectIntent(
             "note_folder_create", clarification="¿Quiere crear una carpeta o una nota, señor?",
@@ -288,6 +317,17 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         )
     # Explicit Notes nouns take precedence over generic verbs such as "crea" or
     # "anota", which are also valid reminder verbs.
+    folder_then_note = re.search(
+        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?carpeta\s+(.+?)\s+y\s+dentro\s+"
+        r"(?:crea|cree|crear)\s+(?:una\s+)?nota(?:\s+(?:que\s+se\s+llame|llamada|titulada))?\s+(.+)$",
+        message,
+    )
+    if folder_then_note:
+        return DirectIntent("note_create_in_new_folder", arguments={
+            "folder_name": parse_entity_name(folder_then_note.group(1)),
+            "title": parse_entity_name(folder_then_note.group(2)),
+        }, domain="notes", operation="create")
+
     folder_delete = re.search(
         r"(?is)\b(?:elimina|eliminar|borra|borrar)\s+(?:la\s+)?(?:sub)?carpeta(?:\s+de\s+notas)?(?:\s+(?:llamada|titulada))?\s+(.+)$",
         message,
@@ -340,38 +380,38 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
 
     checklist_create = re.search(
         r"(?is)\b(?:crea|cree|crear)\s+(?:un(?:a)?\s+)?(?:nota\s+(?:tipo\s+)?)?(?:checklist|lista\s+de\s+tareas)"
-        r"(?:\s+(?:llamad[oa]|titulad[oa]))?\s+(.+?)"
+        r"(?:\s+(?:que\s+se\s+llame|llamad[oa]|titulad[oa]|con\s+(?:el\s+)?nombre|de\s+nombre))?\s+(.+?)"
         r"(?:\s+(?:con\s+)?(?:los\s+)?(?:puntos|elementos|tareas)\s*[:：]\s*(.+))?$",
         message,
     )
     if checklist_create:
         raw_items = checklist_create.group(2) or ""
         items = [
-            item.strip(" .") for item in re.split(r"\s*[,;]\s*|\s+y\s+(?=[^,;]+$)", raw_items, flags=re.I)
+            item.strip(" .") for item in re.split(r"\s*[,;]\s*", raw_items, flags=re.I)
             if item.strip(" .")
         ]
         return DirectIntent("checklist_create", "bookshell_notes_write", {
-            "action": "create", "title": checklist_create.group(1).strip(" ."),
+            "action": "create", "title": parse_entity_name(checklist_create.group(1)),
             "content": "\n".join(f"- [ ] {item}" for item in items), "tags": ["checklist"],
         }, domain="notes", operation="create")
 
     note_create_with_content = re.search(
-        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?nota(?:\s+(?:llamada|titulada))?\s+(.+?)"
+        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?nota(?:\s+(?:que\s+se\s+llame|llamada|titulada|con\s+(?:el\s+)?nombre|de\s+nombre))?\s+(.+?)"
         r"\s+(?:con\s+)?(?:el\s+)?contenido\s*[:：]?\s*(.+)$",
         message,
     )
     if note_create_with_content:
         return DirectIntent("note_create", "bookshell_notes_write", {
-            "action": "create", "title": note_create_with_content.group(1).strip(" ."),
+            "action": "create", "title": parse_entity_name(note_create_with_content.group(1)),
             "content": note_create_with_content.group(2).strip(),
         }, domain="notes", operation="create")
 
     note_create = re.search(
-        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?nota(?:\s+(?:llamada|titulada))?\s+(.+)$", message,
+        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?nota(?:\s+(?:que\s+se\s+llame|llamada|titulada|con\s+(?:el\s+)?nombre|de\s+nombre))?\s+(.+)$", message,
     )
     if note_create:
         return DirectIntent("note_create", "bookshell_notes_write", {
-            "action": "create", "title": note_create.group(1).strip(" ."), "content": "",
+            "action": "create", "title": parse_entity_name(note_create.group(1)), "content": "",
         }, domain="notes", operation="create")
 
     reading = re.search(
@@ -420,18 +460,94 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
             "query": note_open.group(1).strip(" ."), "limit": 5,
         }, domain="notes", operation="read")
 
-    check_mark = re.search(r"(?is)\b(?:marca|completa)\s+(.+?)\s+(?:en|de)\s+(?:la\s+)?(?:nota\s+)?(.+)$", message)
-    if check_mark and ("checklist" in text or "nota" in text):
-        return DirectIntent("checklist_mark", "bookshell_notes_write", {
-            "action": "update", "title": check_mark.group(2).strip(" ."),
-            "check_item": check_mark.group(1).strip(" ."),
+    checklist_exists = re.search(
+        r"(?is)\b(?:conf[ií]rmame\s+si\s+existe|existe)\s+(?:el\s+|la\s+)?(?:checklist|lista\s+de\s+tareas)\s+(.+)$",
+        message,
+    )
+    if checklist_exists:
+        return DirectIntent("checklist_exists", domain="notes", operation="read", arguments={
+            "target_name": parse_entity_name(checklist_exists.group(1)),
+        })
+
+    append_patterns = (r"(?is)\ben\s+(.+?)\s+a[nñ]ade\s+(.+)$",)
+    for pattern in append_patterns:
+        append = re.search(pattern, message)
+        if append:
+            item = append.group(2).strip(" .")
+            missing = ("checklist_item_content",) if checklist_item_incomplete(item) else ()
+            return DirectIntent(
+                "checklist_append", arguments={
+                    "target_name": parse_entity_name(append.group(1)), "item": item,
+                },
+                clarification="¿Qué quiere que pueda hacer, señor?" if missing else None,
+                domain="notes", operation="update", missing_fields=missing,
+            )
+
+    content_first_append = re.search(
+        r"(?is)\ba[nñ]ade\s+(.+?)\s+(?:al|a\s+la)\s+checklist\s+(.+)$", message,
+    )
+    if content_first_append:
+        item = content_first_append.group(1).strip(" .")
+        missing = ("checklist_item_content",) if checklist_item_incomplete(item) else ()
+        return DirectIntent(
+            "checklist_append", arguments={
+                "target_name": parse_entity_name(content_first_append.group(2)), "item": item,
+            }, clarification="¿Qué quiere que pueda hacer, señor?" if missing else None,
+            domain="notes", operation="update", missing_fields=missing,
+        )
+
+    explicit_append = re.search(r"(?is)\ba[nñ]ade\s+(?:al|a\s+la)\s+checklist\s+(.+)$", message)
+    if explicit_append:
+        return DirectIntent(
+            "checklist_append_explicit", arguments={"utterance": explicit_append.group(1).strip(" .")},
+            domain="notes", operation="update",
+        )
+
+    check_mark = re.search(
+        r"(?is)\b(?:marca|completa)\s+(.+?)\s+(?:como\s+hech[oa]\s+)?(?:en|de)\s+(?:el\s+|la\s+)?(?:checklist\s+)?(.+)$",
+        message,
+    )
+    if check_mark:
+        return DirectIntent("checklist_mark", arguments={
+            "target_name": parse_entity_name(check_mark.group(2)), "item": check_mark.group(1).strip(" ."),
         }, domain="notes", operation="update")
 
-    pending_checklist = re.search(r"(?is)\bque\s+(?:queda|falta|esta\s+pendiente)\b.*\b(?:checklist|nota)\s+(.+)$", text)
+    check_unmark = re.search(
+        r"(?is)\b(?:desmarca|marca\s+como\s+pendiente)\s+(.+?)\s+(?:en|de)\s+(?:el\s+|la\s+)?(?:checklist\s+)?(.+)$",
+        message,
+    )
+    if check_unmark:
+        return DirectIntent("checklist_unmark", arguments={
+            "target_name": parse_entity_name(check_unmark.group(2)), "item": check_unmark.group(1).strip(" ."),
+        }, domain="notes", operation="update")
+
+    pending_checklist = re.search(
+        r"(?is)\b(?:qu[eé]\s+queda|qu[eé]\s+falta|qu[eé]\s+est[aá]\s+pendiente)\s+(?:en|de)\s+(?:el\s+|la\s+)?(?:checklist\s+)?(.+)$",
+        message,
+    )
     if pending_checklist:
-        return DirectIntent("checklist_pending", "bookshell_notes_query", {
-            "query": pending_checklist.group(1).strip(" .?"), "pending_only": True, "limit": 10,
+        return DirectIntent("checklist_pending", arguments={
+            "target_name": parse_entity_name(pending_checklist.group(1)),
         }, domain="notes", operation="read")
+
+    delete_checklist_item = re.search(
+        r"(?is)\b(?:elimina|borra)\s+(?:el\s+)?(?:punto|item|elemento)\s+(.+?)\s+"
+        r"(?:de|en)\s+(?:el\s+|la\s+)?(?:checklist\s+)?(.+)$",
+        message,
+    )
+    if delete_checklist_item:
+        return DirectIntent("checklist_delete_item", arguments={
+            "item": delete_checklist_item.group(1).strip(" ."),
+            "target_name": parse_entity_name(delete_checklist_item.group(2)),
+        }, domain="notes", operation="update")
+
+    delete_checklist = re.search(
+        r"(?is)\b(?:elimina|borra)\s+(?:el\s+|la\s+)?checklist\s+(.+)$", message,
+    )
+    if delete_checklist:
+        return DirectIntent("checklist_delete", arguments={
+            "target_name": parse_entity_name(delete_checklist.group(1)),
+        }, domain="notes", operation="delete")
     web_page_context = bool(re.search(r"\b(?:wikipedia|pagina\s+web|sitio\s+web|internet|url|web)\b", text))
     page = re.search(
         r"\bpagina(?:\s+(?:a|en))?\s+(\d{1,5})\b|\b(?:voy\s+(?:por|en|a)\s+la|hasta\s+la)\s+(\d{1,5})\b",
@@ -550,6 +666,20 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
 def continue_direct_intent(
     pending: DirectIntent, message: str, today: date, now: datetime | None = None,
 ) -> DirectIntent | None:
+    if pending.kind == "checklist_append" and "checklist_item_content" in pending.missing_fields:
+        item = message.strip(" \t\r\n¿?¡!.,;")
+        if checklist_item_incomplete(item):
+            return DirectIntent(
+                "checklist_append", arguments=dict(pending.arguments or {}),
+                clarification="¿Qué quiere que pueda hacer, señor?", domain="notes",
+                operation="update", missing_fields=("checklist_item_content",),
+            )
+        arguments = dict(pending.arguments or {})
+        prefix = str(arguments.get("item") or "").strip()
+        arguments["item"] = f"{prefix} {item}".strip()
+        return DirectIntent(
+            "checklist_append", arguments=arguments, domain="notes", operation="update",
+        )
     if pending.kind != "reminder_create":
         return None
     arguments = dict(pending.arguments or {})
@@ -593,6 +723,8 @@ def is_pending_field_response(pending: DirectIntent, message: str) -> bool:
     """Only resume a pending action when the reply can fill its expected field."""
     text = normalize(message)
     expected = pending.missing_fields[0] if pending.missing_fields else ""
+    if expected == "checklist_item_content":
+        return bool(message.strip())
     if expected == "time":
         return bool(
             _resolve_time(text, allow_bare=True).present
@@ -601,6 +733,39 @@ def is_pending_field_response(pending: DirectIntent, message: str) -> bool:
     if expected == "date":
         return _extract_date(text, date.today()) is not None
     return False
+
+
+def repair_direct_intent(
+    previous_message: str, correction: str, today: date, now: datetime | None = None,
+) -> DirectIntent | None:
+    """Overlay explicit correction fields without reviving stale prior values."""
+    previous = route_direct_intent(previous_message, today, now)
+    if previous is None:
+        return route_direct_intent(correction, today, now)
+    text = normalize(correction)
+    if previous.domain == "reminders" and previous.operation in {"list", "search"}:
+        arguments = dict(previous.arguments or {})
+        scope = _temporal_scope(text)
+        target_date = _extract_date(text, today)
+        if scope:
+            for key in ("from", "until"):
+                arguments.pop(key, None)
+            arguments["scope"] = scope
+        elif target_date:
+            arguments.pop("scope", None)
+            arguments.update({"from": target_date, "until": target_date})
+        corrected_query = _reminder_query(re.sub(
+            r"\b(?:no|perdona|perdon|queria\s+decir|quise\s+decir|me\s+equivoque|revisa\s+bien|porque|es\s+mentira)\b",
+            " ", text,
+        ))
+        if corrected_query:
+            arguments["query"] = corrected_query
+        operation = "search" if arguments.get("query") else "list"
+        return DirectIntent(
+            f"reminder_{operation}", "bookshell_reminders_query", arguments,
+            domain="reminders", operation=operation,
+        )
+    return route_direct_intent(correction, today, now) or previous
 
 
 MONTH_NAMES = (

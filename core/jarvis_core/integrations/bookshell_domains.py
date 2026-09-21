@@ -507,19 +507,26 @@ class BookShellDomains:
         return result
 
     async def notes_delete(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        note_id = str(arguments.get("note_id") or "").strip()
         title = str(arguments.get("title") or "").strip()
-        if not title:
+        if not note_id and not title:
             return {"deleted": False, "clarificationRequired": True, "message": "Falta el título de la nota."}
         notes = await self.client.data("notes/notes") or {}
         rows = [{"id": key, **value} for key, value in notes.items() if isinstance(value, dict)]
+        if note_id:
+            matched = next((row for row in rows if str(row.get("id")) == note_id), None)
+            ambiguous: list[dict[str, Any]] = []
+        else:
+            matched = None
         exact = [row for row in rows if _norm(row.get("title")) == _norm(title)]
-        if len(exact) > 1:
+        if not note_id and len(exact) > 1:
             return {
                 "deleted": False, "clarificationRequired": True,
                 "message": "Hay varias notas con ese título; indique cuál quiere eliminar, señor.",
                 "candidates": [{"id": row.get("id"), "title": row.get("title")} for row in exact],
             }
-        matched, ambiguous = (exact[0], []) if len(exact) == 1 else _match(title, rows, "title")
+        if not note_id:
+            matched, ambiguous = (exact[0], []) if len(exact) == 1 else _match(title, rows, "title")
         if ambiguous:
             return {
                 "deleted": False, "clarificationRequired": True,
@@ -590,6 +597,33 @@ class BookShellDomains:
                 if not changed:
                     return {"updated": False, "verified": False, "message": "No encuentro ese elemento pendiente."}
                 allowed["content"] = "\n".join(lines)
+            if arguments.get("uncheck_item"):
+                wanted_item = _norm(arguments.get("uncheck_item"))
+                lines = str(current_note.get("content") or "").splitlines()
+                changed = False
+                for index, line in enumerate(lines):
+                    match = re.match(r"^(\s*-\s*)\[[xX]\](\s*)(.+?)\s*$", line)
+                    if match and wanted_item in _norm(match.group(3)):
+                        lines[index] = f"{match.group(1)}[ ]{match.group(2)}{match.group(3)}"
+                        changed = True
+                        break
+                if not changed:
+                    return {"updated": False, "verified": False, "message": "No encuentro ese elemento completado."}
+                allowed["content"] = "\n".join(lines)
+            if arguments.get("delete_item"):
+                wanted_item = _norm(arguments.get("delete_item"))
+                lines = str(current_note.get("content") or "").splitlines()
+                retained: list[str] = []
+                changed = False
+                for line in lines:
+                    match = re.match(r"^\s*-\s*\[[ xX]\]\s*(.+?)\s*$", line)
+                    if not changed and match and wanted_item in _norm(match.group(1)):
+                        changed = True
+                        continue
+                    retained.append(line)
+                if not changed:
+                    return {"updated": False, "verified": False, "message": "No encuentro ese elemento."}
+                allowed["content"] = "\n".join(retained)
             write_started = time.perf_counter(); await self.client.patch_data(f"notes/notes/{note_id}", {**allowed, "updatedAt": now}); write_ms = (time.perf_counter() - write_started) * 1000
             readback_started = time.perf_counter()
             persisted = await self.client.data("notes/notes") or {}
@@ -795,7 +829,7 @@ def register_domain_tools(registry: ToolRegistry, domains: BookShellDomains) -> 
     registry.register(Tool("bookshell_notes_folder_query", "Busca carpetas de Notes por nombre.", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, domains.notes_folders_query))
     registry.register(Tool("bookshell_notes_folder_create", "Crea una carpeta de Notes si no existe y verifica su persistencia.", {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}, domains.notes_folder_write))
     registry.register(Tool("bookshell_notes_folder_delete", "Elimina una carpeta de Notes solo si está vacía; nunca borra en cascada.", {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}, domains.notes_folder_delete))
-    registry.register(Tool("bookshell_notes_delete", "Localiza una nota por título, la elimina por UUID y verifica que desapareció.", {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]}, domains.notes_delete))
-    registry.register(Tool("bookshell_notes_write", "Crea o actualiza una nota visible en BookShell; admite checklists Markdown persistentes y no elimina notas.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "note_id": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}, "append_content": {"type": "string"}, "check_item": {"type": "string"}, "category": {"type": "string"}, "folderId": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["action"]}, domains.notes_write))
+    registry.register(Tool("bookshell_notes_delete", "Elimina una nota ya resuelta por UUID y verifica que desapareció; conserva título solo para compatibilidad.", {"type": "object", "properties": {"note_id": {"type": "string"}, "title": {"type": "string"}}}, domains.notes_delete))
+    registry.register(Tool("bookshell_notes_write", "Crea o actualiza una nota visible en BookShell; admite checklists Markdown persistentes y no elimina notas.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "note_id": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}, "append_content": {"type": "string"}, "check_item": {"type": "string"}, "uncheck_item": {"type": "string"}, "delete_item": {"type": "string"}, "category": {"type": "string"}, "folderId": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["action"]}, domains.notes_write))
     registry.register(Tool("bookshell_recipes_query", "Busca recetas y devuelve ingredientes, pasos y detalles reales.", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, domains.recipes_query))
     registry.register(Tool("bookshell_recipes_write", "Crea o actualiza una receta básica cuando ingredientes/pasos están claros; no elimina recetas.", {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "recipe_id": {"type": "string"}, "title": {"type": "string"}, "notes": {"type": "string"}, "meal": {"type": "string"}, "servings": {"type": "integer"}, "tags": {"type": "array", "items": {"type": "string"}}, "ingredients": {"type": "array", "items": {"type": "object"}}, "steps": {"type": "array", "items": {"type": "object"}}}, "required": ["action"]}, domains.recipes_write))

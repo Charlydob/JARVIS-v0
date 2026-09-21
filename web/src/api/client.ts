@@ -14,6 +14,7 @@ export interface ChatResponse {
   message_id: string
   language?: string
   turn_id?: string
+  sources?: Array<{ title: string; domain: string; url: string }>
 }
 
 export interface HistoryItem {

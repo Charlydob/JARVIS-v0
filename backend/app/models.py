@@ -20,6 +20,7 @@ class ChatResponse(BaseModel):
     message_id: str
     language: str | None = None
     turn_id: str | None = None
+    sources: list[dict[str, str]] | None = None
 
 
 class AudioResponse(BaseModel):

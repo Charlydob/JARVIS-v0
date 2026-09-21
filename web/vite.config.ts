@@ -18,13 +18,15 @@ export default defineConfig(({ mode }) => {
         name: 'JARVIS — Asistente personal',
         short_name: 'JARVIS',
         description: 'Interfaz de tu asistente personal',
+        lang: 'es',
         theme_color: '#000000',
         background_color: '#000000',
         display: 'standalone',
         orientation: 'any',
         start_url: '/',
         icons: [
-          { src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' }
+          { src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+          { src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'maskable' }
         ]
       },
       workbox: {

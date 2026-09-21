@@ -38,6 +38,16 @@ button { color: inherit; }
 .state-label { margin: 12px 0 0; color: #aaa; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
 .notice { max-width: 520px; max-height: 30dvh; min-height: 44px; margin: 12px 24px 0; padding: 0 4px; overflow-y: auto; overscroll-behavior: contain; color: #666; font-size: 14px; line-height: 1.55; text-align: center; white-space: pre-wrap; scrollbar-width: none; }
 .notice::-webkit-scrollbar { display: none; }
+.sources-panel { position: fixed; z-index: 6; right: max(20px, env(safe-area-inset-right)); bottom: max(22px, env(safe-area-inset-bottom)); width: min(390px, calc(100vw - 40px)); max-height: 52dvh; overflow: auto; padding: 18px; border: 1px solid #2b2b2b; border-radius: 18px; background: #0b0b0bf5; box-shadow: 0 20px 70px #000; backdrop-filter: blur(14px); }
+.sources-panel header { display: flex; align-items: center; justify-content: space-between; }
+.sources-panel h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.sources-panel button { width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; color: #777; cursor: pointer; }
+.sources-panel button:hover { background: #191919; color: #fff; }
+.sources-panel ol { margin: 12px 0 0; padding-left: 26px; }
+.sources-panel li { margin: 9px 0; color: #666; }
+.sources-panel a { display: grid; gap: 3px; color: #e8e8e8; text-decoration: none; }
+.sources-panel a:hover span { text-decoration: underline; }
+.sources-panel small { color: #777; font-size: 11px; }
 
 .face--listening .eye { animation: attentive 2.6s cubic-bezier(.45, 0, .55, 1) infinite; }
 .face--thinking .eyes { animation: think-shift 2s cubic-bezier(.65, 0, .35, 1) infinite; }
@@ -125,6 +135,7 @@ button { color: inherit; }
   .dashboard-header h1 { font-size: 20px; }
   .history-item { max-width: 91%; }
   .notice { max-width: 90vw; }
+  .sources-panel { right: 14px; bottom: 14px; width: calc(100vw - 28px); }
 }
 
 @media (min-width: 641px) and (prefers-reduced-motion: no-preference) {

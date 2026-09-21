@@ -1,5 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#05090d"/>
-  <path d="M82 220c42-54 101-69 148-24-29 80-103 98-148 24Zm348 0c-42-54-101-69-148-24 29 80 103 98 148 24Z" fill="#63f3ff"/>
-  <circle cx="177" cy="222" r="18" fill="#e9feff"/><circle cx="335" cy="222" r="18" fill="#e9feff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" role="img" aria-label="Cara de JARVIS">
+  <rect width="1000" height="1000" rx="220" fill="#000"/>
+  <circle cx="350" cy="360" r="60" fill="#fff"/>
+  <circle cx="650" cy="360" r="60" fill="#fff"/>
+  <rect x="410" y="520" width="180" height="40" rx="18.897638" ry="18.897638" fill="#fff"/>
 </svg>

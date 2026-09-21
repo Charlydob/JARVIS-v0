@@ -218,11 +218,30 @@ class ToolRegistry:
                 if key in required:
                     raise ValueError(f"Invalid arguments for {tool.name}: {key} is required")
                 continue
+            if expected == "boolean" and isinstance(value, str):
+                lowered = value.strip().casefold()
+                if lowered in {"true", "false"}:
+                    value = lowered == "true"
+            if expected == "integer" and isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+                value = int(value.strip())
             if expected == "array" and isinstance(value, str):
+                raw = value.strip()
                 try:
-                    value = json.loads(value)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"Invalid arguments for {tool.name}: {key} must be a JSON array") from exc
+                    value = json.loads(raw)
+                except json.JSONDecodeError:
+                    # Tolerate the simple Python-looking string-array shape
+                    # occasionally emitted by local models, without eval().
+                    match = re.fullmatch(r"\[\s*(.*?)\s*\]", raw, flags=re.DOTALL)
+                    if not match:
+                        raise ValueError(f"Invalid arguments for {tool.name}: {key} must be a JSON array")
+                    inner = match.group(1)
+                    if not inner:
+                        value = []
+                    else:
+                        parts = [part.strip() for part in inner.split(",")]
+                        if any(not re.fullmatch(r"(['\"])(?:\\.|(?!\1).)*\1", part) for part in parts):
+                            raise ValueError(f"Invalid arguments for {tool.name}: {key} must be a JSON array")
+                        value = [re.sub(r"\\(['\"\\])", r"\1", part[1:-1]) for part in parts]
             type_valid = {
                 "string": isinstance(value, str),
                 "array": isinstance(value, list),

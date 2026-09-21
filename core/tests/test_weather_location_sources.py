@@ -60,7 +60,8 @@ async def test_open_meteo_tomorrow_uses_daily_forecast_and_no_tavily(tmp_path: P
         "conversation_id": "weather", "turn_id": "weather-1",
     }, lambda _chunk: asyncio.sleep(0))
     assert web_calls == 0
-    assert "Mañana" in result["message"] and "70 %" in result["message"] and "23 °C" in result["message"]
+    assert "Mañana" in result["message"] and "70 %" in result["message"] and "14 y los 23 grados" in result["message"]
+    assert "viento" not in result["message"]
 
 
 @pytest.mark.asyncio

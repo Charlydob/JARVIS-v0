@@ -150,6 +150,7 @@ export default function App() {
   const [feedbackReason, setFeedbackReason] = useState('incorrect_information')
   const [selectionMode, setSelectionMode] = useState(false)
   const [selectedMessages, setSelectedMessages] = useState<Set<string>>(() => new Set())
+  const [sources, setSources] = useState<Array<{ title: string; domain: string; url: string }>>([])
   const conversationId = useRef<string>()
   const sessionLanguage = useRef('es')
   const noticeRef = useRef<HTMLParagraphElement>(null)
@@ -277,6 +278,7 @@ export default function App() {
     const speechEpoch = speechEpochRef.current + 1
     speechEpochRef.current = speechEpoch
     activeTurnRef.current = turnId
+    setSources([])
     dispatch({ type: 'SUBMIT' })
     setNotice(cleanMessage)
     let turnSpeechQueue: PrefetchedSpeechQueue<Blob> | undefined
@@ -319,6 +321,7 @@ export default function App() {
       conversationId.current = response.conversation_id
       sessionLanguage.current = response.language || sessionLanguage.current
       setLatestResponse({ id: response.message_id, rating: null })
+      if (response.sources?.length) setSources(response.sources)
       fullText = cleanAssistantText(response.message || fullText)
       setNotice(fullText)
       if (!responseStarted) dispatch({ type: 'RESPONSE' })
@@ -678,6 +681,16 @@ export default function App() {
         <p className="state-label">{stateLabels[state]}</p>
         <p className="notice" ref={noticeRef}>{notice}</p>
       </section>
+      {sources.length > 0 && (
+        <aside className="sources-panel" aria-label="Fuentes consultadas" aria-live="polite">
+          <header><h2>Fuentes</h2><button onClick={() => setSources([])} aria-label="Cerrar fuentes"><X size={17} /></button></header>
+          <ol>
+            {sources.map((source) => (
+              <li key={source.url}><a href={source.url} target="_blank" rel="noreferrer"><span>{source.title}</span><small>{source.domain}</small></a></li>
+            ))}
+          </ol>
+        </aside>
+      )}
     </main>
     {correctionDialog}
     </>

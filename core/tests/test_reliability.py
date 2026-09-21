@@ -218,8 +218,8 @@ async def test_exact_checklist_sequence_always_uses_real_notes_tools(tmp_path: P
             "message": prompt, "conversation_id": "real-checklist", "turn_id": f"real-checklist-{index}",
         }, collect))
     assert [name for name, _ in calls] == ["write", "write", "write", "query"]
-    assert calls[1][1]["append_content"] == "- [ ] mejorar STT\n- [ ] wake word"
-    assert "wake word" in results[-1]["message"]
+    assert calls[1][1]["append_content"] == "- [ ] mejorar STT y wake word"
+    assert "No queda ningún elemento pendiente" in results[-1]["message"]
     assert all(result["message"] for result in results)
 
 
