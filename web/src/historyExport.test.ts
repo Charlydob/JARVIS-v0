@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { HistoryItem } from './api/client'
-import { formatHistorySelection } from './historyExport'
+import { copyHistorySelection, formatHistorySelection } from './historyExport'
 
 describe('formatHistorySelection', () => {
   it('copies selected messages chronologically with clean roles and exact text', () => {
@@ -24,5 +24,26 @@ describe('formatHistorySelection', () => {
       '[08:59] Usuario:\nMensaje 5'
     )
     vi.restoreAllMocks()
+  })
+})
+
+describe('copyHistorySelection', () => {
+  const item = {
+    id: '1', conversation_id: 'c', role: 'user' as const, content: 'Hola',
+    created_at: '2026-09-18T08:55:00.000Z', rating: null, reward: null,
+    reason: null, correction: null, reason_code: null, comment: null, expected_behavior: null,
+  }
+
+  it('reports success so the UI can clear selection and leave selection mode', async () => {
+    const clipboard = vi.fn(async () => undefined)
+    const result = await copyHistorySelection([item], clipboard)
+    expect(clipboard).toHaveBeenCalledOnce()
+    expect(result).toEqual({ copied: true, notice: 'Copiado' })
+  })
+
+  it('reports failure so the UI keeps the current selection', async () => {
+    const clipboard = vi.fn(async () => { throw new Error('denied') })
+    const result = await copyHistorySelection([item], clipboard)
+    expect(result).toEqual({ copied: false, notice: 'No se pudo copiar' })
   })
 })

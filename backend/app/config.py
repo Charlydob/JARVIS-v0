@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     core_timeout_seconds: float = 180.0
     max_audio_bytes: int = 25 * 1024 * 1024
     build_sha: str = "development"
+    version: str = "unknown"
 
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"), env_prefix="JARVIS_", extra="ignore", case_sensitive=False

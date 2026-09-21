@@ -3,11 +3,14 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig(({ mode }) => {
-  const vadSilenceSeconds = loadEnv(mode, '..', 'JARVIS_VAD_SILENCE_SECONDS').JARVIS_VAD_SILENCE_SECONDS || '1.5'
+  const buildEnv = loadEnv(mode, '..', '')
+  const vadSilenceSeconds = buildEnv.JARVIS_VAD_SILENCE_SECONDS || '1.5'
+  const appVersion = buildEnv.VITE_APP_VERSION || 'unknown'
   return {
   envDir: '..',
   define: {
     'import.meta.env.JARVIS_VAD_SILENCE_SECONDS': JSON.stringify(vadSilenceSeconds),
+    'import.meta.env.VITE_APP_VERSION': JSON.stringify(appVersion),
   },
   plugins: [
     react(),

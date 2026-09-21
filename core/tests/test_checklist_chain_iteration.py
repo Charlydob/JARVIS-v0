@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from jarvis_core.config import CoreSettings
-from jarvis_core.intents import repair_direct_intent, route_direct_intent
+from jarvis_core.intents import parse_entity_name, repair_direct_intent, route_direct_intent
 from jarvis_core.services import JarvisServices, render_weather_forecast
 from jarvis_core.tools import Tool, ToolRegistry
 
@@ -20,6 +20,26 @@ def test_shared_name_parser_and_reminder_stopwords() -> None:
     assert reminder.arguments == {"scope": "tomorrow"}
     today = route_direct_intent("hoy tengo recordatorios", date(2026, 9, 21))
     assert today is not None and today.arguments == {"scope": "today"}
+
+
+@pytest.mark.parametrize("phrase,kind,key", [
+    ("podrías crear un checklist que se llame mejoras jarvis", "checklist_create", "title"),
+    ("elimina el checklist que se llama mejoras Jarvis", "checklist_delete", "target_name"),
+    ("elimina el checklist que se llame mejoras Jarvis", "checklist_delete", "target_name"),
+    ("podrías eliminar la nota que se llame mejoras jarvis", "note_delete", "title"),
+])
+def test_real_spoken_name_wrappers_are_removed(phrase: str, kind: str, key: str) -> None:
+    intent = route_direct_intent(phrase, date(2026, 9, 21))
+    assert intent is not None and intent.kind == kind
+    assert intent.arguments[key] == "mejoras"
+
+
+def test_quoted_jarvis_is_preserved_as_part_of_the_name() -> None:
+    assert parse_entity_name("llamada 'Proyecto Jarvis'") == "Proyecto Jarvis"
+
+
+def test_core_version_comes_from_canonical_version_file(tmp_path: Path) -> None:
+    assert CoreSettings(data_dir=tmp_path, tool_modules="").version == Path("VERSION").read_text(encoding="utf-8").strip()
 
 
 def test_reminder_repair_overlays_explicit_today() -> None:
@@ -52,13 +72,13 @@ def test_tool_argument_types_are_normalized_before_validation() -> None:
 def test_weather_formatter_is_brief_natural_and_omits_irrelevant_wind() -> None:
     answer = render_weather_forecast({
         "available": True, "scope": "tomorrow", "days": [{
-            "weather_code": 0, "temperature_2m_min": 9.4, "temperature_2m_max": 21.2,
+            "weather_code": 0, "temperature_2m_min": 9.6, "temperature_2m_max": 21.4,
             "precipitation_sum": 0, "precipitation_probability_max": 0,
             "wind_speed_10m_max": 8.7,
         }],
     })
     assert "Mañana estará despejado" in answer
-    assert "entre los 9 y los 21 grados" in answer
+    assert "entre los 10 y los 21 grados" in answer
     assert "No se espera lluvia" in answer
     assert "viento" not in answer
 
@@ -113,6 +133,14 @@ async def test_explicit_checklist_identity_uses_real_query_and_uuid_after_unrela
     assert calls[-1][1] == {"action": "update", "note_id": "id-1", "append_content": "- [ ] revisar el icono"}
     assert notes["id-1"]["content"] == "- [ ] revisar el icono"
     await services.chat_stream({
+        "message": "añade al checklist de mejoras comprobar el funcionamiento actual",
+        "conversation_id": "identity", "turn_id": "identity-0003c",
+    }, collect)
+    assert calls[-1][1] == {
+        "action": "update", "note_id": "id-1",
+        "append_content": "- [ ] comprobar el funcionamiento actual",
+    }
+    await services.chat_stream({
         "message": "añade revisar el contraste al checklist Mejoras",
         "conversation_id": "identity", "turn_id": "identity-0003b",
     }, collect)
@@ -134,6 +162,110 @@ async def test_similar_checklists_require_clarification(tmp_path: Path) -> None:
     assert "Mejoras Jarvis" in result["message"] and "Mejoras Hotel" in result["message"]
     assert "¿A cuál" in result["message"]
     assert [name for name, _ in calls] == ["query"]
+
+
+def _deletion_services(tmp_path: Path, *, fail_ids: set[str] | None = None):
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+    notes = {
+        "note-1": {"id": "note-1", "title": "Mejoras Jarvis", "content": "", "tags": []},
+        "note-2": {"id": "note-2", "title": "Mejoras Jarvis", "content": "", "tags": []},
+        "check-1": {"id": "check-1", "title": "Mejoras", "content": "", "tags": ["checklist"]},
+        "check-2": {"id": "check-2", "title": "Mejoras Hotel", "content": "", "tags": ["checklist"]},
+    }
+    calls: list[tuple[str, dict]] = []
+
+    async def query(arguments):
+        calls.append(("query", dict(arguments)))
+        return {"items": [dict(note) for note in notes.values()], "count": len(notes)}
+
+    async def delete(arguments):
+        calls.append(("delete", dict(arguments)))
+        note_id = arguments["note_id"]
+        if note_id in (fail_ids or set()):
+            return {"deleted": False, "verified": False, "message": "BookShell no confirmó la eliminación, señor."}
+        removed = notes.pop(note_id, None)
+        return {"deleted": bool(removed), "verified": bool(removed), "id": note_id, "note": removed}
+
+    services.tools.register(Tool("bookshell_notes_query", "query", {"type": "object"}, query))
+    services.tools.register(Tool("bookshell_notes_delete", "delete", {"type": "object"}, delete))
+    return services, notes, calls
+
+
+@pytest.mark.asyncio
+async def test_checklist_delete_resolves_uuid_and_verifies_absence(tmp_path: Path) -> None:
+    services, notes, calls = _deletion_services(tmp_path)
+    result = await services.chat_stream({
+        "message": "elimina el checklist que se llama mejoras Jarvis",
+        "conversation_id": "delete-checklist", "turn_id": "delete-checklist-1",
+    }, lambda _chunk: asyncio.sleep(0))
+    assert result["message"] == "Checklist «Mejoras» eliminado y verificado, señor."
+    assert "check-1" not in notes
+    assert calls[-1] == ("delete", {"note_id": "check-1"})
+
+
+@pytest.mark.asyncio
+async def test_delete_all_followup_executes_and_verifies_every_candidate(tmp_path: Path) -> None:
+    services, notes, calls = _deletion_services(tmp_path)
+    collect = lambda _chunk: asyncio.sleep(0)
+    question = await services.chat_stream({
+        "message": "podrías eliminar la nota que se llame mejoras jarvis",
+        "conversation_id": "delete-all", "turn_id": "delete-all-1",
+    }, collect)
+    assert "¿Cuál quiere eliminar" in question["message"]
+    result = await services.chat_stream({
+        "message": "Todas", "conversation_id": "delete-all", "turn_id": "delete-all-2",
+    }, collect)
+    assert result["message"] == "Se han eliminado las 2 notas y he verificado el cambio, señor."
+    assert "note-1" not in notes and "note-2" not in notes
+    assert [args["note_id"] for name, args in calls if name == "delete"] == ["note-1", "note-2"]
+
+
+@pytest.mark.asyncio
+async def test_delete_ambiguity_supports_second_candidate_and_cancel(tmp_path: Path) -> None:
+    services, notes, calls = _deletion_services(tmp_path)
+    collect = lambda _chunk: asyncio.sleep(0)
+    await services.chat_stream({
+        "message": "elimina la nota mejoras jarvis", "conversation_id": "second", "turn_id": "second-1",
+    }, collect)
+    await services.chat_stream({
+        "message": "la segunda", "conversation_id": "second", "turn_id": "second-2",
+    }, collect)
+    assert "note-2" not in notes and calls[-1] == ("delete", {"note_id": "note-2"})
+    await services.chat_stream({
+        "message": "elimina el checklist mejora", "conversation_id": "cancel", "turn_id": "cancel-1",
+    }, collect)
+    deletes_before = len([call for call in calls if call[0] == "delete"])
+    cancelled = await services.chat_stream({
+        "message": "olvídalo", "conversation_id": "cancel", "turn_id": "cancel-2",
+    }, collect)
+    assert cancelled["message"] == "Cancelado, señor."
+    assert len([call for call in calls if call[0] == "delete"]) == deletes_before
+
+
+@pytest.mark.asyncio
+async def test_checklist_ambiguity_can_be_resolved_by_title_fragment(tmp_path: Path) -> None:
+    services, notes, calls = _deletion_services(tmp_path)
+    collect = lambda _chunk: asyncio.sleep(0)
+    question = await services.chat_stream({
+        "message": "elimina el checklist mejora", "conversation_id": "hotel", "turn_id": "hotel-1",
+    }, collect)
+    assert "Mejoras" in question["message"] and "Mejoras Hotel" in question["message"]
+    result = await services.chat_stream({
+        "message": "la de Hotel", "conversation_id": "hotel", "turn_id": "hotel-2",
+    }, collect)
+    assert result["message"] == "Checklist «Mejoras Hotel» eliminado y verificado, señor."
+    assert "check-2" not in notes and calls[-1] == ("delete", {"note_id": "check-2"})
+
+
+@pytest.mark.asyncio
+async def test_failed_delete_never_claims_success(tmp_path: Path) -> None:
+    services, _notes, _calls = _deletion_services(tmp_path, fail_ids={"check-1"})
+    result = await services.chat_stream({
+        "message": "elimina el checklist mejoras", "conversation_id": "failure", "turn_id": "failure-1",
+    }, lambda _chunk: asyncio.sleep(0))
+    lowered = result["message"].casefold()
+    for forbidden in ("eliminado", "hecho", "verificado", "completado correctamente"):
+        assert forbidden not in lowered
 
 
 @pytest.mark.asyncio

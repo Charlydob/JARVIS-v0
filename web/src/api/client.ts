@@ -4,7 +4,7 @@ export interface StatusResponse {
   gateway_build_sha: string
   web_build_sha: string
   core_connected: boolean
-  core: { providers?: Record<string, string>; ollama_ready?: boolean; last_seen?: string; build_sha?: string } | null
+  core: { version?: string; providers?: Record<string, string>; ollama_ready?: boolean; last_seen?: string; build_sha?: string } | null
 }
 
 export interface ChatResponse {

@@ -13,7 +13,6 @@ from app.config import get_settings
 from app.models import AudioResponse, ChatRequest, ChatResponse, FeedbackRequest, StatusResponse
 from app.relay import CoreOfflineError, CoreRelay, CoreRequestError
 
-VERSION = "0.2.0"
 settings = get_settings()
 
 
@@ -40,7 +39,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="JARVIS Gateway", version=VERSION, lifespan=lifespan)
+app = FastAPI(title="JARVIS Gateway", version=settings.version, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
@@ -70,7 +69,7 @@ async def api_status(request: Request) -> StatusResponse:
     active = relay(request)
     return StatusResponse(
         status="ready" if active.connected else "offline",
-        gateway_version=VERSION,
+        gateway_version=settings.version,
         gateway_build_sha=settings.build_sha,
         web_build_sha=settings.build_sha,
         core_connected=active.connected,

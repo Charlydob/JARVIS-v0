@@ -22,15 +22,32 @@ def normalize(value: str) -> str:
 
 def parse_entity_name(value: str) -> str:
     """Strip syntactic naming wrappers without rewriting the entity itself."""
-    cleaned = value.strip(" \t\r\n'\"¿?¡!,.;:-")
+    raw = value.strip(" \t\r\n¿?¡!,.;:-")
+    quoted = re.fullmatch(r"(?:'([^']+)'|\"([^\"]+)\"|«([^»]+)»)", raw)
+    if quoted:
+        return re.sub(r"\s+", " ", next(part for part in quoted.groups() if part is not None)).strip()
+    cleaned = raw
     cleaned = re.sub(
-        r"(?is)^\s*(?:que\s+se\s+llame|llamad[oa]|con\s+(?:el\s+)?nombre|de\s+nombre)\s+",
+        r"(?is)^\s*(?:(?:que\s+se\s+llam(?:e|a))|llamad[oa]|titulad[oa]|"
+        r"con\s+(?:el\s+)?nombre|de\s+nombre)\s+",
         "", cleaned,
     )
+    quoted = re.fullmatch(r"\s*(?:'([^']+)'|\"([^\"]+)\"|«([^»]+)»)\s*", cleaned)
+    if quoted:
+        return re.sub(r"\s+", " ", next(part for part in quoted.groups() if part is not None)).strip()
+    cleaned = cleaned.strip("'\"")
     cleaned = re.sub(r"(?is)^\s*jarvis\s*[,;:-]?\s*", "", cleaned)
     if re.search(r"(?is)(?:^|\s)jarvis\s*$", cleaned) and not re.search(r"(?is)\bpara\s+jarvis\s*$", cleaned):
         cleaned = re.sub(r"(?is)\s*[,;:-]?\s+jarvis\s*$", "", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip(" \t\r\n'\"¿?¡!,.;:-")
+
+
+def _entity_tail(value: str, *, allow_leading_de: bool = False) -> str:
+    """Parse the tail after an entity noun; command regexes never consume naming wrappers."""
+    cleaned = value.strip()
+    if allow_leading_de:
+        cleaned = re.sub(r"(?is)^\s*de\s+", "", cleaned, count=1)
+    return parse_entity_name(cleaned)
 
 
 def _next_weekday(today: date, weekday: int) -> str:
@@ -329,31 +346,30 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         }, domain="notes", operation="create")
 
     folder_delete = re.search(
-        r"(?is)\b(?:elimina|eliminar|borra|borrar)\s+(?:la\s+)?(?:sub)?carpeta(?:\s+de\s+notas)?(?:\s+(?:llamada|titulada))?\s+(.+)$",
+        r"(?is)\b(?:elimina|eliminar|borra|borrar)\s+(?:la\s+)?(?:sub)?carpeta(?:\s+de\s+notas)?\b(.*)$",
         message,
     )
     if folder_delete:
         return DirectIntent("note_folder_delete", "bookshell_notes_folder_delete", {
-            "name": _notes_name(folder_delete.group(1)),
+            "name": _entity_tail(folder_delete.group(1), allow_leading_de=True),
         }, domain="notes", operation="delete")
 
     note_delete = re.search(
-        r"(?is)\b(?:elimina|eliminar|borra|borrar)\s+(?:la\s+)?nota(?:\s+(?:llamada|titulada))?\s+(.+)$",
+        r"(?is)\b(?:elimina|eliminar|borra|borrar)\s+(?:la\s+)?nota\b(.*)$",
         message,
     )
     if note_delete:
         return DirectIntent("note_delete", "bookshell_notes_delete", {
-            "title": _notes_name(note_delete.group(1)),
+            "title": _entity_tail(note_delete.group(1), allow_leading_de=True),
         }, domain="notes", operation="delete")
 
     folder_create = re.search(
-        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?(?:sub)?carpeta"
-        r"(?:\s+(?:en|de)\s+notas)?(?:\s+(?:que\s+se\s+llame|llamada|titulada|con\s+(?:el\s+)?nombre))?\s+(.+)$",
+        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?(?:sub)?carpeta(?:\s+(?:en|de)\s+notas)?\b(.*)$",
         message,
     )
     if folder_create:
         return DirectIntent("note_folder_create", "bookshell_notes_folder_create", {
-            "name": _notes_name(folder_create.group(1)),
+            "name": _entity_tail(folder_create.group(1)),
         }, domain="notes", operation="create")
 
     note_in_folder_patterns = (
@@ -379,39 +395,43 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         }, domain="notes", operation="create")
 
     checklist_create = re.search(
-        r"(?is)\b(?:crea|cree|crear)\s+(?:un(?:a)?\s+)?(?:nota\s+(?:tipo\s+)?)?(?:checklist|lista\s+de\s+tareas)"
-        r"(?:\s+(?:que\s+se\s+llame|llamad[oa]|titulad[oa]|con\s+(?:el\s+)?nombre|de\s+nombre))?\s+(.+?)"
-        r"(?:\s+(?:con\s+)?(?:los\s+)?(?:puntos|elementos|tareas)\s*[:：]\s*(.+))?$",
+        r"(?is)\b(?:crea|cree|crear)\s+(?:un(?:a)?\s+)?(?:nota\s+(?:tipo\s+)?)?"
+        r"(?:checklist|lista\s+de\s+tareas)\b(.*)$",
         message,
     )
     if checklist_create:
-        raw_items = checklist_create.group(2) or ""
+        tail = checklist_create.group(1).strip()
+        listed = re.search(
+            r"(?is)^(.*?)\s+(?:con\s+)?(?:los\s+)?(?:puntos|elementos|tareas)\s*[:：]\s*(.+)$",
+            tail,
+        )
+        raw_name, raw_items = (listed.group(1), listed.group(2)) if listed else (tail, "")
         items = [
             item.strip(" .") for item in re.split(r"\s*[,;]\s*", raw_items, flags=re.I)
             if item.strip(" .")
         ]
         return DirectIntent("checklist_create", "bookshell_notes_write", {
-            "action": "create", "title": parse_entity_name(checklist_create.group(1)),
+            "action": "create", "title": _entity_tail(raw_name),
             "content": "\n".join(f"- [ ] {item}" for item in items), "tags": ["checklist"],
         }, domain="notes", operation="create")
 
     note_create_with_content = re.search(
-        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?nota(?:\s+(?:que\s+se\s+llame|llamada|titulada|con\s+(?:el\s+)?nombre|de\s+nombre))?\s+(.+?)"
+        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?nota\b(.*?)"
         r"\s+(?:con\s+)?(?:el\s+)?contenido\s*[:：]?\s*(.+)$",
         message,
     )
     if note_create_with_content:
         return DirectIntent("note_create", "bookshell_notes_write", {
-            "action": "create", "title": parse_entity_name(note_create_with_content.group(1)),
+            "action": "create", "title": _entity_tail(note_create_with_content.group(1)),
             "content": note_create_with_content.group(2).strip(),
         }, domain="notes", operation="create")
 
     note_create = re.search(
-        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?nota(?:\s+(?:que\s+se\s+llame|llamada|titulada|con\s+(?:el\s+)?nombre|de\s+nombre))?\s+(.+)$", message,
+        r"(?is)\b(?:crea|cree|crear)\s+(?:una\s+)?nota\b(.*)$", message,
     )
     if note_create:
         return DirectIntent("note_create", "bookshell_notes_write", {
-            "action": "create", "title": parse_entity_name(note_create.group(1)), "content": "",
+            "action": "create", "title": _entity_tail(note_create.group(1)), "content": "",
         }, domain="notes", operation="create")
 
     reading = re.search(
@@ -457,7 +477,7 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
     note_open = re.search(r"(?is)\babre\s+mentalmente\s+(?:la\s+)?nota\s+(.+)$", message)
     if note_open:
         return DirectIntent("note_open", "bookshell_notes_query", {
-            "query": note_open.group(1).strip(" ."), "limit": 5,
+            "query": parse_entity_name(note_open.group(1)), "limit": 5,
         }, domain="notes", operation="read")
 
     checklist_exists = re.search(
@@ -466,7 +486,7 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
     )
     if checklist_exists:
         return DirectIntent("checklist_exists", domain="notes", operation="read", arguments={
-            "target_name": parse_entity_name(checklist_exists.group(1)),
+            "target_name": _entity_tail(checklist_exists.group(1), allow_leading_de=True),
         })
 
     append_patterns = (r"(?is)\ben\s+(.+?)\s+a[nñ]ade\s+(.+)$",)
@@ -499,7 +519,9 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
     explicit_append = re.search(r"(?is)\ba[nñ]ade\s+(?:al|a\s+la)\s+checklist\s+(.+)$", message)
     if explicit_append:
         return DirectIntent(
-            "checklist_append_explicit", arguments={"utterance": explicit_append.group(1).strip(" .")},
+            "checklist_append_explicit", arguments={
+                "utterance": re.sub(r"(?is)^\s*de\s+", "", explicit_append.group(1)).strip(" .")
+            },
             domain="notes", operation="update",
         )
 
@@ -542,11 +564,11 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         }, domain="notes", operation="update")
 
     delete_checklist = re.search(
-        r"(?is)\b(?:elimina|borra)\s+(?:el\s+|la\s+)?checklist\s+(.+)$", message,
+        r"(?is)\b(?:elimina|eliminar|borra|borrar)\s+(?:el\s+|la\s+)?checklist\b(.*)$", message,
     )
     if delete_checklist:
         return DirectIntent("checklist_delete", arguments={
-            "target_name": parse_entity_name(delete_checklist.group(1)),
+            "target_name": _entity_tail(delete_checklist.group(1), allow_leading_de=True),
         }, domain="notes", operation="delete")
     web_page_context = bool(re.search(r"\b(?:wikipedia|pagina\s+web|sitio\s+web|internet|url|web)\b", text))
     page = re.search(

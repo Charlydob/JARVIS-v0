@@ -24,7 +24,7 @@ from jarvis_core.config import CoreSettings
 from jarvis_core.feedback import FeedbackLearning
 from jarvis_core.intents import (
     DirectIntent, checklist_item_incomplete, continue_direct_intent, is_pending_field_response, normalize,
-    render_direct_result, repair_direct_intent, route_direct_intent,
+    parse_entity_name, render_direct_result, repair_direct_intent, route_direct_intent,
 )
 from jarvis_core.language import SessionLanguagePolicy, response_language
 from jarvis_core.storage import Storage
@@ -172,6 +172,15 @@ class PendingAction:
     domain: str
     operation: str
     intent: DirectIntent
+
+
+@dataclass
+class PendingEntityChoice:
+    created_at: float
+    intent: DirectIntent
+    entity_type: str
+    candidates: list[dict[str, Any]]
+    original_query: str
 
 
 def normalized_transcript(value: str) -> str:
@@ -454,6 +463,7 @@ class JarvisServices:
         self._turn_results: dict[str, tuple[dict[str, Any], float]] = {}
         self._turn_inflight: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._pending_intents: dict[str, PendingAction] = {}
+        self._pending_entity_choices: dict[str, PendingEntityChoice] = {}
         self._recent_query_intents: dict[str, tuple[DirectIntent, float]] = {}
         self._recent_notes: dict[str, tuple[dict[str, Any], float]] = {}
         self._recent_web_sources: dict[str, tuple[list[dict[str, Any]], float]] = {}
@@ -463,7 +473,7 @@ class JarvisServices:
 
     async def status(self) -> dict[str, Any]:
         return {
-            "version": "0.2.0",
+            "version": self.settings.version,
             "build_sha": self.settings.build_sha,
             "providers": {
                 "llm": f"ollama/{self.settings.ollama_model}",
@@ -652,7 +662,12 @@ class JarvisServices:
             self._pending_intents.pop(conversation_id, None)
             TOOL_LOGGER.info("turn_id=%s pending_action_expired=true pending_action_id=%s", turn_id, pending.id)
             pending = None
-        direct = (
+        pending_choice = self._pending_entity_choices.get(conversation_id)
+        if pending_choice and time.monotonic() - pending_choice.created_at > PENDING_ACTION_TIMEOUT_S:
+            self._pending_entity_choices.pop(conversation_id, None)
+            pending_choice = None
+        choice_direct = self._pending_entity_followup(conversation_id, message) if pending_choice else None
+        direct = choice_direct or (
             repair_direct_intent(repair_source, message, today, local_now)
             if repair_source else route_direct_intent(routing_message, today, local_now)
         )
@@ -676,7 +691,7 @@ class JarvisServices:
             direct = DirectIntent(
                 "note_update", "bookshell_notes_write",
                 {
-                    "action": "update", "title": last_message_note.group(1).strip(" ."),
+                    "action": "update", "title": parse_entity_name(last_message_note.group(1)),
                     "append_content": assistant_text,
                 },
                 clarification=None if assistant_text else "No hay un mensaje anterior de JARVIS que pueda anotar, señor.",
@@ -828,6 +843,7 @@ class JarvisServices:
             "source_display",
             "web_entity_confirm",
             "note_create_in_new_folder",
+            "pending_cancel", "pending_delete_all",
         }
         if direct and direct.tool is None and direct.clarification is None and direct.kind not in deterministic_without_tool:
             direct = None
@@ -895,6 +911,14 @@ class JarvisServices:
                     ",".join(direct.missing_fields) or "none", pending_action.id,
                     pending_action.expected_field, pending_action.originating_turn,
                 )
+            elif direct.kind == "pending_cancel":
+                answer = "Cancelado, señor."
+            elif direct.kind == "pending_delete_all":
+                answer, pending_tools, pending_results = await self._delete_pending_candidates(
+                    direct.arguments or {}, conversation_id,
+                )
+                tools_used.extend(pending_tools)
+                tool_results.extend(pending_results)
             elif direct.kind == "reminder_delete":
                 answer, delete_tools, delete_results = await self._delete_reminders(direct.arguments or {})
                 tools_used.extend(delete_tools)
@@ -911,6 +935,11 @@ class JarvisServices:
                 tool_results.extend(checklist_results)
                 if resolved_note:
                     self._recent_notes[conversation_id] = (resolved_note, time.monotonic())
+                self._pending_intents.pop(conversation_id, None)
+            elif direct.kind == "note_delete":
+                answer, note_tools, note_results = await self._handle_note_delete(direct, conversation_id)
+                tools_used.extend(note_tools)
+                tool_results.extend(note_results)
                 self._pending_intents.pop(conversation_id, None)
             elif direct.kind == "source_display":
                 sources = list((direct.arguments or {}).get("sources") or [])[:8]
@@ -1377,6 +1406,125 @@ class JarvisServices:
             return scored[0][1], []
         return None, [row for score, row in scored if score >= max(0.64, scored[0][0] - 0.12)]
 
+    def _pending_entity_followup(self, conversation_id: str, message: str) -> DirectIntent | None:
+        pending = self._pending_entity_choices.get(conversation_id)
+        if pending is None:
+            return None
+        reply = normalize(message).strip(" .,!?:;")
+        if re.fullmatch(r"(?:ningun[oa]s?|olvidalo|cancela|cancelar|dejalo)", reply):
+            self._pending_entity_choices.pop(conversation_id, None)
+            return DirectIntent("pending_cancel", domain="notes", operation="cancel")
+        if pending.intent.operation == "delete" and re.fullmatch(
+            r"(?:tod[oa]s?|eliminalas\s+todas|eliminalos\s+todos|borra(?:las|los)?\s+tod[oa]s?)", reply,
+        ):
+            return DirectIntent(
+                "pending_delete_all", arguments={
+                    "entity_type": pending.entity_type,
+                    "candidates": pending.candidates,
+                }, domain="notes", operation="delete",
+            )
+        ordinal = re.fullmatch(r"(?:la\s+|el\s+)?(primera|primero|segunda|segundo|tercera|tercero)", reply)
+        selected: dict[str, Any] | None = None
+        if ordinal:
+            index = {"primera": 0, "primero": 0, "segunda": 1, "segundo": 1, "tercera": 2, "tercero": 2}[ordinal.group(1)]
+            if index < len(pending.candidates):
+                selected = pending.candidates[index]
+        else:
+            descriptor = re.sub(r"^(?:la|el)\s+(?:de\s+)?", "", reply).strip()
+            contained = [
+                row for row in pending.candidates
+                if descriptor and descriptor in self._checklist_name(row.get("title"))
+            ]
+            if len(contained) == 1:
+                selected = contained[0]
+            else:
+                selected, ambiguous = self._resolve_checklist_candidate(descriptor, pending.candidates)
+                if ambiguous:
+                    return None
+        if selected is None:
+            return None
+        self._pending_entity_choices.pop(conversation_id, None)
+        arguments = dict(pending.intent.arguments or {})
+        arguments.update({"note_id": selected.get("id"), "target_name": selected.get("title")})
+        return DirectIntent(
+            pending.intent.kind, pending.intent.tool, arguments,
+            domain=pending.intent.domain, operation=pending.intent.operation,
+        )
+
+    async def _handle_note_delete(
+        self, direct: DirectIntent, conversation_id: str,
+    ) -> tuple[str, list[str], list[Any]]:
+        arguments = dict(direct.arguments or {})
+        requested = str(arguments.get("title") or arguments.get("target_name") or "").strip()
+        tools_used: list[str] = []
+        tool_results: list[Any] = []
+        matched: dict[str, Any] | None = None
+        if arguments.get("note_id"):
+            matched = {"id": arguments["note_id"], "title": requested}
+        else:
+            if not self.tools.has("bookshell_notes_query"):
+                return "La consulta de Notes no está configurada en el Core, señor.", [], []
+            raw = await self.tools.execute("bookshell_notes_query", {"limit": 100})
+            queried = json.loads(raw)
+            tools_used.append("bookshell_notes_query")
+            tool_results.append({"tool": "bookshell_notes_query", "result": queried})
+            rows = [
+                row for row in queried.get("items") or []
+                if "checklist" not in [normalize(str(tag)) for tag in row.get("tags") or []]
+            ]
+            matched, ambiguous = self._resolve_checklist_candidate(requested, rows)
+            if ambiguous:
+                self._pending_entity_choices[conversation_id] = PendingEntityChoice(
+                    time.monotonic(), direct, "note", ambiguous, requested,
+                )
+                names = [f"«{row.get('title') or 'Sin título'}»" for row in ambiguous[:4]]
+                return f"He encontrado {' y '.join(names)}. ¿Cuál quiere eliminar, señor?", tools_used, tool_results
+        if not matched:
+            return f"No encuentro la nota «{requested}», señor.", tools_used, tool_results
+        return await self._delete_resolved_note(matched, "note", tools_used, tool_results)
+
+    async def _delete_resolved_note(
+        self, matched: dict[str, Any], entity_type: str,
+        tools_used: list[str], tool_results: list[Any],
+    ) -> tuple[str, list[str], list[Any]]:
+        label = "checklist" if entity_type == "checklist" else "nota"
+        title = str(matched.get("title") or "sin título")
+        if not self.tools.has("bookshell_notes_delete"):
+            return "La eliminación de Notes no está configurada en el Core, señor.", tools_used, tool_results
+        raw = await self.tools.execute("bookshell_notes_delete", {"note_id": str(matched.get("id") or "")})
+        result = json.loads(raw)
+        tools_used.append("bookshell_notes_delete")
+        tool_results.append({"tool": "bookshell_notes_delete", "result": result})
+        if result.get("deleted") is True and result.get("verified") is True:
+            return f"{label.capitalize()} «{title}» eliminado y verificado, señor.", tools_used, tool_results
+        return str(result.get("message") or f"BookShell no confirmó la eliminación del {label}, señor."), tools_used, tool_results
+
+    async def _delete_pending_candidates(
+        self, arguments: dict[str, Any], conversation_id: str,
+    ) -> tuple[str, list[str], list[Any]]:
+        candidates = list(arguments.get("candidates") or [])
+        entity_type = str(arguments.get("entity_type") or "note")
+        tools_used: list[str] = []
+        tool_results: list[Any] = []
+        if not self.tools.has("bookshell_notes_delete"):
+            return "La eliminación de Notes no está configurada en el Core, señor.", tools_used, tool_results
+        deleted = 0
+        for candidate in candidates:
+            raw = await self.tools.execute("bookshell_notes_delete", {"note_id": str(candidate.get("id") or "")})
+            result = json.loads(raw)
+            tools_used.append("bookshell_notes_delete")
+            tool_results.append({"tool": "bookshell_notes_delete", "result": result})
+            if result.get("deleted") is True and result.get("verified") is True:
+                deleted += 1
+        self._pending_entity_choices.pop(conversation_id, None)
+        total = len(candidates)
+        noun = "checklists" if entity_type == "checklist" else "notas"
+        if total and deleted == total:
+            return f"Se han eliminado las {total} {noun} y he verificado el cambio, señor.", tools_used, tool_results
+        if deleted:
+            return f"He eliminado {deleted} de {total}; {total - deleted} no pudieron eliminarse, señor.", tools_used, tool_results
+        return f"No se pudo eliminar ninguna de las {total} {noun}, señor.", tools_used, tool_results
+
     async def _handle_checklist_intent(
         self, direct: DirectIntent, conversation_id: str,
     ) -> tuple[str, list[str], list[Any], dict[str, Any] | None]:
@@ -1436,6 +1584,9 @@ class JarvisServices:
                 matched = active
 
         if ambiguous:
+            self._pending_entity_choices[conversation_id] = PendingEntityChoice(
+                time.monotonic(), direct, "checklist", ambiguous, requested,
+            )
             names = [f"«{row.get('title') or 'Sin título'}»" for row in ambiguous[:4]]
             options = " y ".join(names) if len(names) <= 2 else ", ".join(names[:-1]) + " y " + names[-1]
             return f"He encontrado {options}. ¿A cuál se refiere, señor?", tools_used, tool_results, None
@@ -1461,8 +1612,10 @@ class JarvisServices:
             return answer, tools_used, tool_results, matched
 
         if direct.kind == "checklist_delete":
-            write_tool = "bookshell_notes_delete"
-            write_arguments: dict[str, Any] = {"note_id": note_id}
+            answer, tools_used, tool_results = await self._delete_resolved_note(
+                matched, "checklist", tools_used, tool_results,
+            )
+            return answer, tools_used, tool_results, None
         else:
             write_tool = "bookshell_notes_write"
             write_arguments = {"action": "update", "note_id": note_id}
@@ -1486,8 +1639,6 @@ class JarvisServices:
         if not succeeded:
             return str(written.get("message") or "BookShell no confirmó la operación, señor."), tools_used, tool_results, matched
         saved = written.get("note") or matched
-        if direct.kind == "checklist_delete":
-            return f"Checklist «{title}» eliminado y verificado, señor.", tools_used, tool_results, None
         return "Hecho y verificado en BookShell, señor.", tools_used, tool_results, saved
 
     async def _delete_reminders(
@@ -1848,12 +1999,10 @@ class JarvisServices:
         successful = all(payload[key] is True for key in action_flags) if action_flags else True
         if payload.get("verified") is True and any(payload.get(key) is True for key in ("existing", "duplicate", "alreadyCurrent")):
             successful = True
-        if tool_name in {
-            "bookshell_update_progress", "bookshell_create_reminder", "bookshell_gym_write",
-            "bookshell_create_book", "bookshell_notes_write", "bookshell_notes_folder_create",
-            "bookshell_notes_delete", "bookshell_notes_folder_delete",
-            "bookshell_finance_create",
-        }:
+        bookshell_mutation = tool_name.startswith("bookshell_") and any(
+            marker in tool_name for marker in ("write", "create", "update", "delete", "mark")
+        )
+        if bookshell_mutation:
             return successful and payload.get("verified") is True
         return successful
 

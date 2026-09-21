@@ -30,3 +30,14 @@ export async function copyPlainText(value: string): Promise<void> {
   area.remove()
   if (!copied) throw new Error('El navegador no permitió copiar la conversación.')
 }
+
+export async function copyHistorySelection(
+  items: HistoryItem[], copy: (value: string) => Promise<void> = copyPlainText,
+): Promise<{ copied: boolean; notice: 'Copiado' | 'No se pudo copiar' }> {
+  try {
+    await copy(formatHistorySelection(items))
+    return { copied: true, notice: 'Copiado' }
+  } catch {
+    return { copied: false, notice: 'No se pudo copiar' }
+  }
+}

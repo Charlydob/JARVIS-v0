@@ -15,7 +15,14 @@ def detected_build_sha() -> str:
             head = (git_dir / head[5:]).read_text(encoding="utf-8").strip()
         return head
     except (OSError, IndexError):
-        return "development"
+        return "unknown"
+
+
+def product_version() -> str:
+    try:
+        return (Path(__file__).resolve().parents[2] / "VERSION").read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        return "unknown"
 
 
 class CoreSettings(BaseSettings):
@@ -38,6 +45,7 @@ class CoreSettings(BaseSettings):
     reconnect_max_seconds: int = 30
     log_level: str = "INFO"
     build_sha: str = detected_build_sha()
+    version: str = product_version()
 
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"), env_prefix="JARVIS_", extra="ignore", case_sensitive=False

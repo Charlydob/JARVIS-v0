@@ -20,9 +20,10 @@ import { JarvisState, stateLabels, transition } from './state/machine'
 import { takeSpeechSegments } from './speech'
 import { PrefetchedSpeechQueue } from './speechQueue'
 import { parseSpeechInterrupt } from './speechInterrupt'
-import { copyPlainText, formatHistorySelection } from './historyExport'
+import { copyHistorySelection } from './historyExport'
 import { DeviceLocationError, getFreshLocation, requiresFreshLocation } from './deviceLocation'
 import { parseVoiceFeedback } from './voiceFeedback'
+import { versionDisplayLines } from './versionDisplay'
 
 type View = 'face' | 'dashboard'
 
@@ -150,7 +151,12 @@ export default function App() {
   const [feedbackReason, setFeedbackReason] = useState('incorrect_information')
   const [selectionMode, setSelectionMode] = useState(false)
   const [selectedMessages, setSelectedMessages] = useState<Set<string>>(() => new Set())
+  const [copyFeedback, setCopyFeedback] = useState('')
   const [sources, setSources] = useState<Array<{ title: string; domain: string; url: string }>>([])
+  const [versionLines, setVersionLines] = useState(() => versionDisplayLines({
+    version: import.meta.env.VITE_APP_VERSION || 'unknown',
+    buildSha: import.meta.env.VITE_BUILD_SHA || 'development',
+  }, null))
   const conversationId = useRef<string>()
   const sessionLanguage = useRef('es')
   const noticeRef = useRef<HTMLParagraphElement>(null)
@@ -204,6 +210,13 @@ export default function App() {
           core_build_sha: status.core?.build_sha || 'offline',
         })
         if (cancelled) return
+        setVersionLines(versionDisplayLines({
+          version: import.meta.env.VITE_APP_VERSION || 'unknown',
+          buildSha: import.meta.env.VITE_BUILD_SHA || 'development',
+        }, status.core ? {
+          version: status.core.version,
+          buildSha: status.core.build_sha,
+        } : null))
         const firstCheck = !statusCheckedRef.current
         statusCheckedRef.current = true
         const wasOnline = onlineRef.current
@@ -540,11 +553,13 @@ export default function App() {
 
   const copyHistory = async (items: HistoryItem[]) => {
     if (!items.length) return
-    try {
-      await copyPlainText(formatHistorySelection(items))
-      setNotice(`${items.length} mensajes copiados`)
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'No se pudo copiar la conversación')
+    const result = await copyHistorySelection(items)
+    setNotice(result.notice)
+    setCopyFeedback(result.notice)
+    window.setTimeout(() => setCopyFeedback(''), 1800)
+    if (result.copied) {
+      setSelectedMessages(new Set())
+      setSelectionMode(false)
     }
   }
 
@@ -595,6 +610,7 @@ export default function App() {
             <button onClick={() => void copyHistory(history.filter((item) => sameLocalDay(new Date(item.created_at), new Date())))}><Copy size={15} /> Copiar conversación completa de hoy</button>
           </section>
         )}
+        {copyFeedback && <p className="copy-feedback" role="status">{copyFeedback}</p>}
 
         <section className="history-stats" aria-label="Estadísticas persistentes">
           <span><strong>{stats.messages}</strong> Mensajes</span>
@@ -653,6 +669,9 @@ export default function App() {
   return (
     <>
     <main className="app">
+      <div className="runtime-version" aria-label="Versión de JARVIS">
+        {versionLines.map((line) => <span key={line}>{line}</span>)}
+      </div>
       <div className="quick-feedback" aria-label="Valorar la última respuesta de JARVIS">
         <button disabled={!latestResponse} className={latestResponse?.rating === 'good' ? 'selected' : ''} onClick={() => latestResponse && void rate(latestResponse.id, 'good')} aria-label="Marcar última respuesta como buena" aria-pressed={latestResponse?.rating === 'good'}><Cookie size={18} /></button>
         <button disabled={!latestResponse} className={latestResponse?.rating === 'bad' ? 'selected' : ''} onClick={() => latestResponse && void rate(latestResponse.id, 'bad')} aria-label="Marcar última respuesta como mala" aria-pressed={latestResponse?.rating === 'bad'}><WhipIcon size={18} /></button>

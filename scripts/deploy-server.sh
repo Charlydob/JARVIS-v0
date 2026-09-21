@@ -28,6 +28,7 @@ fi
 git fetch --prune origin main
 git merge --ff-only origin/main
 export JARVIS_BUILD_SHA="$(git rev-parse HEAD)"
+export JARVIS_VERSION="$(tr -d '[:space:]' < VERSION)"
 docker compose config --quiet
 docker compose up -d --build gateway web
 
