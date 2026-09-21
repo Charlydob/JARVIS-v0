@@ -21,6 +21,25 @@ def _norm(value: Any) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", text))
 
 
+def is_checklist(note: dict[str, Any] | None) -> bool:
+    """Recognize canonical and legacy BookShell checklists without migrating them."""
+    if not isinstance(note, dict):
+        return False
+    if _norm(note.get("category")) == "checklist":
+        return True
+    tags = note.get("tags") or []
+    if not isinstance(tags, list):
+        return False
+    return any(_norm(tag) == "checklist" for tag in tags)
+
+
+def _checklist_tags(value: Any) -> list[Any]:
+    tags = list(value) if isinstance(value, list) else []
+    if not any(_norm(tag) == "checklist" for tag in tags):
+        tags.append("checklist")
+    return tags
+
+
 def _match(query: str, rows: list[dict[str, Any]], field: str = "name") -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     wanted = _norm(query)
     ranked = sorted(
@@ -580,8 +599,14 @@ class BookShellDomains:
             # `title` identifies the target in natural commands; it is not a
             # rename request and must never be used as a Firebase path/ID.
             allowed.pop("title", None)
+            checklist_update = is_checklist(current_note) or is_checklist(allowed)
+            if checklist_update:
+                allowed["category"] = "checklist"
+                allowed["tags"] = _checklist_tags(allowed.get("tags", current_note.get("tags")))
             if arguments.get("append_content"):
                 existing = str(current_note.get("content") or "").rstrip()
+                if checklist_update and existing.strip() == "[]":
+                    existing = ""
                 added = str(arguments.get("append_content") or "").strip()
                 allowed["content"] = f"{existing}\n{added}".strip()
             if arguments.get("check_item"):
@@ -636,6 +661,11 @@ class BookShellDomains:
                 "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)},
                 **({"message": "La nota no coincide al volver a consultar BookShell."} if not verified else {}),
             }
+        if is_checklist(allowed):
+            allowed["category"] = "checklist"
+            allowed["tags"] = _checklist_tags(allowed.get("tags"))
+            if str(allowed.get("content") or "").strip() == "[]":
+                allowed["content"] = ""
         title = str(allowed.get("title") or "").strip()
         if not title:
             return {"created": False, "clarificationRequired": True, "message": "Falta el título de la nota."}
@@ -675,6 +705,7 @@ class BookShellDomains:
             saved.get(key) == expected for key, expected in {
                 "title": title, "name": title, "folderId": folder_id,
                 "content": note["content"], "type": "note", "noteKind": "text",
+                "category": note["category"], "tags": note["tags"],
             }.items()
         )
         return {"created": verified, "verified": verified, "id": note_id, "note": saved or note, "_timings": {"write_ms": round(write_ms, 1), "readback_ms": round(readback_ms, 1)}}

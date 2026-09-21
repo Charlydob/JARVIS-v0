@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from jarvis_core.integrations.bookshell_domains import BookShellDomains
+from jarvis_core.integrations.bookshell_domains import BookShellDomains, is_checklist
 
 
 class FakeClient:
@@ -187,6 +187,41 @@ def test_blank_checklist_can_add_mark_and_query_persisted_items() -> None:
     pending = asyncio.run(domains.notes_query({"query": "Mejoras para JARVIS", "pending_only": True}))
     assert marked["updated"] is True and marked["verified"] is True
     assert [item["item"] for item in pending["pendingItems"]] == ["wake word"]
+
+
+def test_checklist_identity_accepts_category_or_tag_and_rejects_plain_notes() -> None:
+    assert is_checklist({"category": " Checklist ", "tags": []}) is True
+    assert is_checklist({"category": "", "tags": ["personal", "CHECKLIST"]}) is True
+    assert is_checklist({"category": "note", "tags": ["personal"]}) is False
+
+
+def test_checklist_create_is_canonical_and_empty_array_string_becomes_blank() -> None:
+    client = FakeClient({"notes/folders": {"jarvis": {"name": "Jarvis"}}, "notes/notes": {}})
+    created = asyncio.run(BookShellDomains(client).notes_write({
+        "action": "create", "title": "Mejoras", "content": "[]", "category": "checklist",
+        "tags": ["hotel"],
+    }))
+    saved = client.values["notes/notes"][created["id"]]
+    assert created["created"] is True and created["verified"] is True
+    assert saved["category"] == "checklist"
+    assert saved["tags"] == ["hotel", "checklist"]
+    assert saved["content"] == ""
+
+
+def test_updating_legacy_category_only_checklist_adds_tag_and_not_array_prefix() -> None:
+    client = FakeClient({
+        "notes/folders": {"jarvis": {"name": "Jarvis"}},
+        "notes/notes": {"legacy": {
+            "title": "Mejoras", "category": "checklist", "tags": [], "content": "[]",
+        }},
+    })
+    updated = asyncio.run(BookShellDomains(client).notes_write({
+        "action": "update", "note_id": "legacy", "append_content": "- [ ] probar actualizaciones",
+    }))
+    saved = client.values["notes/notes"]["legacy"]
+    assert updated["updated"] is True and updated["verified"] is True
+    assert saved["category"] == "checklist" and saved["tags"] == ["checklist"]
+    assert saved["content"] == "- [ ] probar actualizaciones"
 
 
 def test_last_message_title_typo_resolves_to_real_note_uuid() -> None:

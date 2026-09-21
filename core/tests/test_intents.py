@@ -122,6 +122,7 @@ def test_natural_notes_phrases_win_and_book_reading_is_an_upsert() -> None:
     assert checklist.kind == "checklist_create"
     assert checklist.arguments == {
         "action": "create", "title": "Mejoras para JARVIS", "content": "", "tags": ["checklist"],
+        "category": "checklist",
     }
     folder = route_direct_intent("crea una carpeta en notas llamada Mejoras para JARVIS", today)
     assert (folder.kind, folder.tool, folder.arguments) == (

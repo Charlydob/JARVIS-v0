@@ -22,6 +22,18 @@ def test_shared_name_parser_and_reminder_stopwords() -> None:
     assert today is not None and today.arguments == {"scope": "today"}
 
 
+def test_spoken_creo_command_is_contextual_and_creates_canonical_checklist() -> None:
+    intent = route_direct_intent(
+        "hola Jarvis creo un checklist que se llame mejoras", date(2026, 9, 21),
+    )
+    assert intent is not None and intent.kind == "checklist_create"
+    assert intent.arguments == {
+        "action": "create", "title": "mejoras", "content": "",
+        "category": "checklist", "tags": ["checklist"],
+    }
+    assert route_direct_intent("creo que un checklist sería útil", date(2026, 9, 21)) is None
+
+
 @pytest.mark.parametrize("phrase,kind,key", [
     ("podrías crear un checklist que se llame mejoras jarvis", "checklist_create", "title"),
     ("elimina el checklist que se llama mejoras Jarvis", "checklist_delete", "target_name"),
@@ -153,6 +165,90 @@ async def test_explicit_checklist_identity_uses_real_query_and_uuid_after_unrela
 
 
 @pytest.mark.asyncio
+async def test_append_to_named_checklist_without_noun_resolves_real_uuid(tmp_path: Path) -> None:
+    services, notes, calls = _checklist_services(tmp_path)
+    notes["id-1"].update({"category": "checklist", "tags": []})
+    result = await services.chat_stream({
+        "message": "añade a Mejoras comprobar el funcionamiento actual",
+        "conversation_id": "named-prefix", "turn_id": "named-prefix-1",
+    }, lambda _chunk: asyncio.sleep(0))
+    assert calls[-1] == ("write", {
+        "action": "update", "note_id": "id-1",
+        "append_content": "- [ ] comprobar el funcionamiento actual",
+    })
+    assert notes["id-1"]["content"] == "- [ ] comprobar el funcionamiento actual"
+    assert result["message"] == "Se ha agregado «comprobar el funcionamiento actual» al checklist «Mejoras», señor."
+
+    second = await services.chat_stream({
+        "message": "añade al checklist de mejoras comprobar el funcionamiento actual 2",
+        "conversation_id": "named-prefix", "turn_id": "named-prefix-2",
+    }, lambda _chunk: asyncio.sleep(0))
+    assert calls[-1] == ("write", {
+        "action": "update", "note_id": "id-1",
+        "append_content": "- [ ] comprobar el funcionamiento actual 2",
+    })
+    assert notes["id-1"]["content"].endswith("- [ ] comprobar el funcionamiento actual 2")
+    assert "Se ha agregado" in second["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_reply", ["A Mejoras", "Mejoras", "al de Mejoras", "al checklist Mejoras"])
+async def test_pending_checklist_target_followup_queries_writes_and_verifies(
+    tmp_path: Path, target_reply: str,
+) -> None:
+    services, notes, calls = _checklist_services(tmp_path)
+    conversation_id = f"pending-{target_reply}"
+    first = await services.chat_stream({
+        "message": "añade el nuevo elemento que es probar actualizaciones 4",
+        "conversation_id": conversation_id, "turn_id": "pending-1",
+    }, lambda _chunk: asyncio.sleep(0))
+    assert first["message"] == "¿A qué checklist quiere añadirlo, señor?"
+    assert calls == []
+    second = await services.chat_stream({
+        "message": target_reply, "conversation_id": conversation_id, "turn_id": "pending-2",
+    }, lambda _chunk: asyncio.sleep(0))
+    assert calls[-2] == ("query", {"limit": 50})
+    assert calls[-1] == ("write", {
+        "action": "update", "note_id": "id-1",
+        "append_content": "- [ ] probar actualizaciones 4",
+    })
+    assert notes["id-1"]["content"] == "- [ ] probar actualizaciones 4"
+    assert "Se ha agregado" in second["message"]
+
+
+@pytest.mark.asyncio
+async def test_pending_checklist_target_write_failure_never_claims_success(tmp_path: Path) -> None:
+    services = JarvisServices(CoreSettings(data_dir=tmp_path, tool_modules=""))
+    calls: list[tuple[str, dict]] = []
+
+    async def query(arguments):
+        calls.append(("query", dict(arguments)))
+        return {"items": [{
+            "id": "id-1", "title": "Mejoras", "content": "", "tags": ["checklist"],
+        }], "count": 1}
+
+    async def failed_write(arguments):
+        calls.append(("failed_write", dict(arguments)))
+        return {"updated": False, "verified": False, "message": "BookShell no confirmó la operación, señor."}
+
+    services.tools.register(Tool("bookshell_notes_query", "query", {"type": "object"}, query))
+    services.tools.register(Tool("bookshell_notes_write", "write", {"type": "object"}, failed_write))
+    collect = lambda _chunk: asyncio.sleep(0)
+    await services.chat_stream({
+        "message": "añade el nuevo elemento que es probar actualizaciones 4",
+        "conversation_id": "pending-fail", "turn_id": "pending-fail-1",
+    }, collect)
+    result = await services.chat_stream({
+        "message": "A Mejoras", "conversation_id": "pending-fail", "turn_id": "pending-fail-2",
+    }, collect)
+    lowered = result["message"].casefold()
+    assert calls[-1][0] == "failed_write"
+    assert "no confirmó" in result["message"]
+    for forbidden in ("se ha agregado", "hecho", "guardado", "verificado"):
+        assert forbidden not in lowered
+
+
+@pytest.mark.asyncio
 async def test_similar_checklists_require_clarification(tmp_path: Path) -> None:
     services, _notes, calls = _checklist_services(tmp_path, ["Mejoras Jarvis", "Mejoras Hotel"])
     result = await services.chat_stream({
@@ -201,6 +297,22 @@ async def test_checklist_delete_resolves_uuid_and_verifies_absence(tmp_path: Pat
     assert result["message"] == "Checklist «Mejoras» eliminado y verificado, señor."
     assert "check-1" not in notes
     assert calls[-1] == ("delete", {"note_id": "check-1"})
+
+
+@pytest.mark.asyncio
+async def test_legacy_category_only_checklist_can_be_resolved_and_deleted(tmp_path: Path) -> None:
+    services, notes, calls = _deletion_services(tmp_path)
+    notes["legacy"] = {
+        "id": "legacy", "title": "Actualizaciones cuatro", "content": "[]",
+        "category": "checklist", "tags": [],
+    }
+    result = await services.chat_stream({
+        "message": "borra el checklist de Actualizaciones cuatro",
+        "conversation_id": "delete-legacy", "turn_id": "delete-legacy-1",
+    }, lambda _chunk: asyncio.sleep(0))
+    assert result["message"] == "Checklist «Actualizaciones cuatro» eliminado y verificado, señor."
+    assert "legacy" not in notes
+    assert calls[-1] == ("delete", {"note_id": "legacy"})
 
 
 @pytest.mark.asyncio

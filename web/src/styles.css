@@ -132,7 +132,7 @@ button { color: inherit; }
   .quick-feedback { top: max(14px, env(safe-area-inset-top)); left: 14px; }
   .menu-button { top: max(14px, env(safe-area-inset-top)); right: 14px; }
   .menu { top: 65px; right: 14px; }
-  .runtime-version { top: max(17px, calc(env(safe-area-inset-top) + 3px)); max-width: 31vw; white-space: normal; }
+  .runtime-version { top: max(17px, calc(env(safe-area-inset-top) + 3px)); max-width: 38vw; color: #444; font-size: 8px; line-height: 1.1; letter-spacing: .02em; white-space: nowrap; -webkit-text-size-adjust: none; text-size-adjust: none; }
   .dashboard { padding-top: 20px; }
   .dashboard-header { grid-template-columns: 86px 1fr 86px; }
   .dashboard-header h1 { font-size: 20px; }

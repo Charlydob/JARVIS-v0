@@ -395,7 +395,7 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         }, domain="notes", operation="create")
 
     checklist_create = re.search(
-        r"(?is)\b(?:crea|cree|crear)\s+(?:un(?:a)?\s+)?(?:nota\s+(?:tipo\s+)?)?"
+        r"(?is)\b(?:crea|cree|crear|creo)\s+(?:un(?:a)?\s+)?(?:nota\s+(?:tipo\s+)?)?"
         r"(?:checklist|lista\s+de\s+tareas)\b(.*)$",
         message,
     )
@@ -412,7 +412,8 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
         ]
         return DirectIntent("checklist_create", "bookshell_notes_write", {
             "action": "create", "title": _entity_tail(raw_name),
-            "content": "\n".join(f"- [ ] {item}" for item in items), "tags": ["checklist"],
+            "content": "\n".join(f"- [ ] {item}" for item in items),
+            "category": "checklist", "tags": ["checklist"],
         }, domain="notes", operation="create")
 
     note_create_with_content = re.search(
@@ -516,12 +517,30 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
             domain="notes", operation="update", missing_fields=missing,
         )
 
+    missing_target_append = re.search(
+        r"(?is)\ba[nñ]ade\s+(?:el\s+)?nuevo\s+elemento\s+que\s+es\s+(.+)$", message,
+    )
+    if missing_target_append:
+        item = missing_target_append.group(1).strip(" .")
+        return DirectIntent(
+            "checklist_append", arguments={"item": item},
+            clarification="¿A qué checklist quiere añadirlo, señor?",
+            domain="notes", operation="update", missing_fields=("checklist_target",),
+        )
+
     explicit_append = re.search(r"(?is)\ba[nñ]ade\s+(?:al|a\s+la)\s+checklist\s+(.+)$", message)
     if explicit_append:
         return DirectIntent(
             "checklist_append_explicit", arguments={
                 "utterance": re.sub(r"(?is)^\s*de\s+", "", explicit_append.group(1)).strip(" .")
             },
+            domain="notes", operation="update",
+        )
+
+    named_append = re.search(r"(?is)\ba[nñ]ade\s+a\s+(.+)$", message)
+    if named_append:
+        return DirectIntent(
+            "checklist_append_explicit", arguments={"utterance": named_append.group(1).strip(" .")},
             domain="notes", operation="update",
         )
 
@@ -688,6 +707,22 @@ def route_direct_intent(message: str, today: date, now: datetime | None = None) 
 def continue_direct_intent(
     pending: DirectIntent, message: str, today: date, now: datetime | None = None,
 ) -> DirectIntent | None:
+    if pending.kind == "checklist_append" and "checklist_target" in pending.missing_fields:
+        target = re.sub(
+            r"(?is)^\s*(?:al\s+checklist(?:\s+de)?\s+|a\s+la\s+checklist(?:\s+de)?\s+|"
+            r"al\s+de\s+|(?:el\s+)?checklist(?:\s+de)?\s+|a\s+|al\s+)",
+            "", message.strip(), count=1,
+        )
+        target = parse_entity_name(target)
+        if not target:
+            return DirectIntent(
+                "checklist_append", arguments=dict(pending.arguments or {}),
+                clarification="¿A qué checklist quiere añadirlo, señor?", domain="notes",
+                operation="update", missing_fields=("checklist_target",),
+            )
+        arguments = dict(pending.arguments or {})
+        arguments["target_name"] = target
+        return DirectIntent("checklist_append", arguments=arguments, domain="notes", operation="update")
     if pending.kind == "checklist_append" and "checklist_item_content" in pending.missing_fields:
         item = message.strip(" \t\r\n¿?¡!.,;")
         if checklist_item_incomplete(item):
@@ -746,6 +781,8 @@ def is_pending_field_response(pending: DirectIntent, message: str) -> bool:
     text = normalize(message)
     expected = pending.missing_fields[0] if pending.missing_fields else ""
     if expected == "checklist_item_content":
+        return bool(message.strip())
+    if expected == "checklist_target":
         return bool(message.strip())
     if expected == "time":
         return bool(
@@ -852,7 +889,12 @@ def render_direct_result(
         return "Nota eliminada y verificada en BookShell, señor." if result.get("deleted") and result.get("verified") else str(result.get("message") or "BookShell no confirmó la eliminación, señor.")
     if kind == "note_folder_delete":
         return "Carpeta eliminada y verificada en BookShell, señor." if result.get("deleted") and result.get("verified") else str(result.get("message") or "BookShell no confirmó la eliminación, señor.")
-    if kind in {"note_create", "note_create_in_folder", "note_update", "checklist_create", "checklist_mark"}:
+    if kind == "checklist_create":
+        succeeded = result.get("created") and result.get("verified")
+        note = result.get("note") or {}
+        title = note.get("title") or (arguments or {}).get("title") or "solicitado"
+        return f"Checklist «{title}» creado y verificado en BookShell, señor." if succeeded else str(result.get("message") or "BookShell no confirmó el checklist, señor.")
+    if kind in {"note_create", "note_create_in_folder", "note_update", "checklist_mark"}:
         succeeded = (result.get("created") or result.get("updated")) and result.get("verified")
         return "Hecho y verificado en BookShell, señor." if succeeded else str(result.get("message") or "BookShell no confirmó la nota, señor.")
     if kind == "note_open":

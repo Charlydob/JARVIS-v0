@@ -22,6 +22,7 @@ from edge_tts import VoicesManager
 from faster_whisper import WhisperModel
 from jarvis_core.config import CoreSettings
 from jarvis_core.feedback import FeedbackLearning
+from jarvis_core.integrations.bookshell_domains import is_checklist
 from jarvis_core.intents import (
     DirectIntent, checklist_item_incomplete, continue_direct_intent, is_pending_field_response, normalize,
     parse_entity_name, render_direct_result, repair_direct_intent, route_direct_intent,
@@ -1470,7 +1471,7 @@ class JarvisServices:
             tool_results.append({"tool": "bookshell_notes_query", "result": queried})
             rows = [
                 row for row in queried.get("items") or []
-                if "checklist" not in [normalize(str(tag)) for tag in row.get("tags") or []]
+                if not is_checklist(row)
             ]
             matched, ambiguous = self._resolve_checklist_candidate(requested, rows)
             if ambiguous:
@@ -1534,7 +1535,7 @@ class JarvisServices:
         use_active_uuid = bool(
             arguments.get("note_id") and active
             and str(active.get("id")) == str(arguments.get("note_id"))
-            and "checklist" in [normalize(str(tag)) for tag in active.get("tags") or []]
+            and is_checklist(active)
         )
         if use_active_uuid:
             rows = [active]
@@ -1549,7 +1550,7 @@ class JarvisServices:
             tool_results = [{"tool": "bookshell_notes_query", "result": queried}]
             rows = [
                 row for row in queried.get("items") or []
-                if "checklist" in [normalize(str(tag)) for tag in row.get("tags") or []]
+                if is_checklist(row)
             ]
         requested = str(arguments.get("target_name") or "").strip()
         item = self._checklist_item_content(str(arguments.get("item") or "").strip())
@@ -1571,7 +1572,7 @@ class JarvisServices:
                     requested, ambiguous = " ".join(words[:size]), candidate_ambiguous
                     break
             if not matched and not ambiguous and direct.kind == "checklist_append_guess":
-                if active and "checklist" in [normalize(str(tag)) for tag in active.get("tags") or []]:
+                if active and is_checklist(active):
                     matched, item = active, self._checklist_item_content(utterance)
                 else:
                     return "¿A qué checklist se refiere, señor?", tools_used, tool_results, None
@@ -1580,7 +1581,7 @@ class JarvisServices:
         elif requested:
             matched, ambiguous = self._resolve_checklist_candidate(requested, rows)
         else:
-            if active and "checklist" in [normalize(str(tag)) for tag in active.get("tags") or []]:
+            if active and is_checklist(active):
                 matched = active
 
         if ambiguous:
@@ -1639,6 +1640,8 @@ class JarvisServices:
         if not succeeded:
             return str(written.get("message") or "BookShell no confirmó la operación, señor."), tools_used, tool_results, matched
         saved = written.get("note") or matched
+        if direct.kind in {"checklist_append", "checklist_append_guess", "checklist_append_explicit"}:
+            return f"Se ha agregado «{item}» al checklist «{title}», señor.", tools_used, tool_results, saved
         return "Hecho y verificado en BookShell, señor.", tools_used, tool_results, saved
 
     async def _delete_reminders(
