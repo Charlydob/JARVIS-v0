@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 class Intent(StrEnum):
     CONVERSATION = "conversation"
+    DATETIME_CURRENT = "datetime.current"
     REMINDER_CREATE = "reminder.create"
     REMINDER_LIST = "reminder.list"
     REMINDER_SEARCH = "reminder.search"
@@ -95,7 +96,7 @@ class ValidationResult:
     missing_fields: tuple[str, ...] = ()
 
 
-CAPABILITY_CATALOG = """conversation
+CAPABILITY_CATALOG = """conversation, datetime.current
 reminder.create(title,date,time), reminder.list(scope), reminder.search(title,scope), reminder.delete(title,scope)
 checklist.create(title), checklist.append(checklist,item), checklist.delete(checklist), checklist.mark(checklist,item), checklist.unmark(checklist,item)
 note.create(title,content,folder), note.update(title,content), note.delete(title), folder.create(name), folder.delete(name)
@@ -110,7 +111,13 @@ Preserve relative dates exactly: if the user says today/tomorrow, output today/t
 A bare 1-12 hour without morning/afternoon is always ambiguous: set time null and add 24-hour options (e.g. 03:00 and 15:00). Never choose one.
 Set continuation true only when a supplied pending plan or recent turn is actually being continued.
 Never invent IDs, UUIDs, URLs, entities, tool results, or facts. If intent or target is unclear, lower confidence or add ambiguity.
-Use conversation for greetings, explanations, opinions and ordinary chat."""
+Use conversation for greetings, explanations, opinions and ordinary chat.
+A pending plan is context, not an instruction. A complete new request always wins over pending context.
+Never copy pending entities into an unrelated intent. Reads can never become mutations due to pending context.
+Set continuation true only when the message clearly supplies or repairs a missing field of the same pending intent.
+In reminder context, 'qué tengo hoy' means reminder.list with scope today.
+'qué día es hoy', 'qué fecha es hoy', 'qué día estamos' and 'qué hora es' mean datetime.current.
+Valid reminder scopes are only today, tomorrow, this_week and next_week."""
 
 
 class SemanticPlanner:
@@ -185,13 +192,27 @@ class PlanValidator:
         Intent.WEB_SEARCH: "web_search",
         Intent.WEB_OPEN_SOURCE: None,
         Intent.PC_OPEN_URL: "pc_open_url",
+        Intent.DATETIME_CURRENT: None,
         Intent.CONVERSATION: None,
+    }
+
+    REMINDER_SCOPES = {"today", "tomorrow", "this_week", "next_week"}
+    REMINDER_SCOPE_ALIASES = {
+        "hoy": "today", "current": "today", "mañana": "tomorrow", "manana": "tomorrow",
+        "esta_semana": "this_week", "semana_actual": "this_week",
+        "proxima_semana": "next_week", "próxima_semana": "next_week",
     }
 
     def validate(self, plan: SemanticPlan, today: date) -> ValidationResult:
         if plan.confidence < 0.70:
             return ValidationResult(clarification="No estoy seguro de haberle entendido. ¿Puede concretarlo, señor?")
         entities = self._normalize(plan.entities, today)
+        if plan.intent in {Intent.REMINDER_LIST, Intent.REMINDER_SEARCH} and "scope" in entities:
+            scope = entities.get("scope")
+            if scope not in self.REMINDER_SCOPES:
+                return ValidationResult(
+                    clarification="No he podido determinar el periodo de los recordatorios. ¿Se refiere a hoy, mañana, esta semana o la próxima, señor?"
+                )
         ambiguous_fields = {item.field for item in plan.ambiguities}
         missing = tuple(
             field for field in self.REQUIRED.get(plan.intent, ())
@@ -213,6 +234,9 @@ class PlanValidator:
     @staticmethod
     def _normalize(entities: dict[str, Any], today: date) -> dict[str, Any]:
         result = dict(entities)
+        if isinstance(result.get("scope"), str):
+            scope = result["scope"].casefold().strip().replace(" ", "_")
+            result["scope"] = PlanValidator.REMINDER_SCOPE_ALIASES.get(scope, scope)
         if result.get("date") == "today":
             result["date"] = today.isoformat()
         elif result.get("date") == "tomorrow":
@@ -290,6 +314,7 @@ def to_direct_intent(result: ValidationResult):
         Intent.WEB_SEARCH: ("web_search", "web", "search"),
         Intent.WEB_OPEN_SOURCE: ("source_open", "web", "open_source"),
         Intent.PC_OPEN_URL: ("pc_open_url", "pc", "open"),
+        Intent.DATETIME_CURRENT: ("datetime_current", "system", "read"),
     }
     if execution.intent == Intent.CONVERSATION:
         return None
@@ -305,6 +330,10 @@ def to_direct_intent(result: ValidationResult):
 
 def merge_pending(pending: PendingPlan, update: SemanticPlan) -> SemanticPlan:
     """Overlay a follow-up/correction on the existing semantic object."""
+    if not update.continuation:
+        raise ValueError("pending merge requires an explicit continuation")
+    if update.intent != pending.plan.intent:
+        raise ValueError("pending merge requires the same semantic intent")
     entities = dict(pending.plan.entities)
     entities.update({key: value for key, value in update.entities.items() if value is not None})
     return pending.plan.model_copy(update={

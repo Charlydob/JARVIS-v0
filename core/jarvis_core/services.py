@@ -28,7 +28,10 @@ from jarvis_core.intents import (
     parse_entity_name, render_direct_result, repair_direct_intent, route_direct_intent,
 )
 from jarvis_core.language import SessionLanguagePolicy, response_language
-from jarvis_core.semantic import Intent, PendingPlan, PlanValidator, SemanticPlanner, merge_pending, to_direct_intent
+from jarvis_core.semantic import (
+    MUTATING_INTENTS, Intent, PendingPlan, PlanValidator, SemanticPlanner, merge_pending,
+    to_direct_intent,
+)
 from jarvis_core.storage import Storage
 from jarvis_core.tools import ToolRegistry
 from jarvis_core.transcription_quality import QualityDecision, TranscriptionQualityGate, likely_own_tts
@@ -705,6 +708,8 @@ class JarvisServices:
         direct = None
         semantic_planned = False
         semantic_conversation = False
+        semantic_current_intent: Intent | None = None
+        semantic_pending_resumed = False
         semantic_pending = self._pending_plans.get(conversation_id)
         if semantic_pending and semantic_pending.expired(PENDING_ACTION_TIMEOUT_S):
             self._pending_plans.pop(conversation_id, None)
@@ -720,17 +725,40 @@ class JarvisServices:
                     message, pending=semantic_pending, recent=recent,
                 )
                 semantic_planned = True
+                semantic_current_intent = semantic.intent
                 semantic_conversation = semantic.intent == Intent.CONVERSATION
-                if semantic_pending and semantic.continuation:
+                if semantic.intent in {Intent.REMINDER_LIST, Intent.REMINDER_SEARCH} and re.search(
+                    r"\b(?:hoy|para\s+hoy)\b", normalized_message,
+                ):
+                    semantic = semantic.model_copy(update={
+                        "entities": {**semantic.entities, "scope": "today"},
+                    })
+                if semantic_pending and semantic.continuation and semantic.intent == semantic_pending.plan.intent:
                     semantic = merge_pending(semantic_pending, semantic)
+                    semantic_pending_resumed = True
+                elif semantic.continuation:
+                    semantic = semantic.model_copy(update={"continuation": False})
                 validation = self.plan_validator.validate(semantic, today)
                 direct = to_direct_intent(validation)
                 if validation.missing_fields:
                     self._pending_plans[conversation_id] = PendingPlan(
                         semantic, validation.missing_fields, turn_id,
                     )
-                elif validation.execution is not None:
+                    self._pending_intents.pop(conversation_id, None)
+                elif validation.execution is not None and (
+                    semantic_pending is None or semantic_pending_resumed
+                    or semantic.intent in MUTATING_INTENTS
+                ):
                     self._pending_plans.pop(conversation_id, None)
+                TOOL_LOGGER.info(
+                    "turn_id=%s semantic_intent=%s semantic_confidence=%.3f pending_before=%s "
+                    "pending_source=%s pending_resumed=%s pending_suspended=%s",
+                    turn_id, semantic.intent.value, semantic.confidence,
+                    semantic_pending.plan.intent.value if semantic_pending else "none",
+                    "semantic" if semantic_pending else "none",
+                    str(semantic_pending_resumed).lower(),
+                    str(bool(semantic_pending and not semantic_pending_resumed)).lower(),
+                )
                 PERFORMANCE_LOGGER.info(
                     "turn_id=%s stage=planner_first_result duration_ms=%.1f intent=%s confidence=%.3f",
                     turn_id, (time.perf_counter() - planner_started) * 1000,
@@ -885,12 +913,19 @@ class JarvisServices:
             recent_query = self._recent_query_intents.get(conversation_id)
             if recent_query and time.monotonic() - recent_query[1] <= 120:
                 direct = self._contextual_reminder_followup(recent_query[0], message, today)
-        pending_resumed = False
-        if pending is not None and is_pending_field_response(pending.intent, message):
+        pending_resumed = semantic_pending_resumed
+        if semantic_planned and pending is not None:
+            self._pending_intents.pop(conversation_id, None)
+            TOOL_LOGGER.info(
+                "turn_id=%s pending_source=legacy pending_action_cancelled=true pending_action_id=%s reason=semantic_turn_wins",
+                turn_id, pending.id,
+            )
+            pending = None
+        if not semantic_planned and pending is not None and is_pending_field_response(pending.intent, message):
             direct = continue_direct_intent(pending.intent, message, today, local_now)
             pending_resumed = direct is not None
             pending.updated_at = time.monotonic()
-        elif pending is not None and direct is not None:
+        elif not semantic_planned and pending is not None and direct is not None:
             self._pending_intents.pop(conversation_id, None)
             TOOL_LOGGER.info(
                 "turn_id=%s pending_action_cancelled=true pending_action_id=%s reason=new_complete_intent",
@@ -898,6 +933,11 @@ class JarvisServices:
             )
             pending = None
         routed = direct
+        current_turn_mutation_authorized = bool(
+            semantic_pending_resumed
+            or (semantic_planned and semantic_current_intent in MUTATING_INTENTS)
+            or (not semantic_planned and direct is not None and direct.operation in {"create", "update", "delete", "open"})
+        )
         if (
             payload.get("transcription_quality") == QualityDecision.LOW_CONFIDENCE.value
             and direct is not None and direct.operation in {"create", "update", "delete", "open"}
@@ -926,7 +966,23 @@ class JarvisServices:
             "web_entity_confirm",
             "note_create_in_new_folder",
             "pending_cancel", "pending_delete_all",
+            "datetime_current",
         }
+        if direct and direct.operation in {"create", "update", "delete", "open"} and not current_turn_mutation_authorized:
+            TOOL_LOGGER.warning(
+                "turn_id=%s mutation_blocked=true reason=stale_or_read_context current_turn_mutation_authorized=false execution_intent=%s tool=%s",
+                turn_id, direct.kind, direct.tool or "none",
+            )
+            direct = DirectIntent(
+                "mutation_blocked",
+                clarification="He bloqueado una acción antigua porque esta petición no autoriza cambios, señor.",
+                domain="safety", operation="clarify",
+            )
+        TOOL_LOGGER.info(
+            "turn_id=%s current_turn_mutation_authorized=%s execution_intent=%s tool=%s",
+            turn_id, str(current_turn_mutation_authorized).lower(),
+            direct.kind if direct else "conversation", direct.tool if direct and direct.tool else "none",
+        )
         if direct and direct.tool is None and direct.clarification is None and direct.kind not in deterministic_without_tool:
             direct = None
         PERFORMANCE_LOGGER.info(
@@ -995,6 +1051,11 @@ class JarvisServices:
                 )
             elif direct.kind == "pending_cancel":
                 answer = "Cancelado, señor."
+            elif direct.kind == "datetime_current":
+                if re.search(r"\bhora\b", normalized_message):
+                    answer = f"Son las {local_now.strftime('%H:%M')}, señor."
+                else:
+                    answer = f"Hoy es {local_now.strftime('%d/%m/%Y')}, señor."
             elif direct.kind == "pending_delete_all":
                 answer, pending_tools, pending_results = await self._delete_pending_candidates(
                     direct.arguments or {}, conversation_id,
@@ -2171,9 +2232,10 @@ class JarvisServices:
     @classmethod
     def _skip_feedback(cls, message: str) -> bool:
         normalized = unicodedata.normalize("NFKD", message.casefold()).encode("ascii", "ignore").decode().strip(" .,!?")
+        without_vocative = re.sub(r"(?:^|\s)jarvis(?:\s|$)", " ", normalized).strip(" .,!?")
         return cls._requests_external_action(message) or normalized in {
             "jarvis", "hola", "buenos dias", "buenas tardes", "buenas noches", "hey jarvis",
-        }
+        } or without_vocative in {"hola", "buenos dias", "buenas tardes", "buenas noches", "hey"}
 
     @staticmethod
     def _render_simple_tool_result(name: str, payload: Any) -> str | None:
